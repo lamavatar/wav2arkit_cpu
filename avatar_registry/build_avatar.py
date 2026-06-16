@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a 2D warp avatar pack from LAM/OAC FBX template + neutral photo."""
+"""Build a 2D warp avatar pack from LAM skin.glb + neutral photo."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from avatar_registry.avatar_pack import AvatarPack, save_avatar_pack
-from avatar_registry.fbx_parser import load_fbx_face_mesh, shape_deltas_3d
+from avatar_registry.glb_loader import LamFaceMesh, load_lam_skin_glb, resolve_skin_glb
 from export_utils import ARKIT_BLENDSHAPE_NAMES
 
 
@@ -44,17 +44,20 @@ def fit_projected_to_image(
     return (projected - mesh_center) * scale + image_center
 
 
-def build_morph_2d_deltas(mesh, blendshape_names: list[str]) -> tuple[np.ndarray, list[str]]:
+def build_morph_2d_deltas(
+    mesh: LamFaceMesh,
+    blendshape_names: list[str],
+) -> tuple[np.ndarray, list[str]]:
     """Return (52, N, 2) deltas aligned with ARKIT_BLENDSHAPE_NAMES order."""
     num_vertices = mesh.neutral_vertices.shape[0]
     deltas = np.zeros((len(blendshape_names), num_vertices, 2), dtype=np.float32)
     missing: list[str] = []
 
     for i, name in enumerate(blendshape_names):
-        if name not in mesh.shapes:
+        delta_3d = mesh.morph_deltas_3d.get(name)
+        if delta_3d is None:
             missing.append(name)
             continue
-        delta_3d = shape_deltas_3d(mesh, name)
         deltas[i, :, 0] = delta_3d[:, 0]
         deltas[i, :, 1] = -delta_3d[:, 1]
 
@@ -62,11 +65,16 @@ def build_morph_2d_deltas(mesh, blendshape_names: list[str]) -> tuple[np.ndarray
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build 2D avatar pack from LAM FBX + photo")
+    parser = argparse.ArgumentParser(description="Build 2D avatar pack from LAM skin.glb + photo")
     parser.add_argument(
-        "--fbx",
-        default=str(ROOT.parent / "sample_oac" / "template_file.fbx"),
-        help="LAM/OAC face template FBX",
+        "--lam-dir",
+        default=str(ROOT.parent / "LAM_Audio2Expression" / "assets" / "sample_lam" / "barbara" / "arkitWithBSData"),
+        help="Directory containing skin.glb (or parent with arkitWithBSData/)",
+    )
+    parser.add_argument(
+        "--skin-glb",
+        default="",
+        help="Optional direct path to skin.glb (overrides --lam-dir)",
     )
     parser.add_argument(
         "--photo",
@@ -89,16 +97,16 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    fbx_path = Path(args.fbx)
+    skin_glb = Path(args.skin_glb) if args.skin_glb else resolve_skin_glb(args.lam_dir)
     photo_path = Path(args.photo)
-    if not fbx_path.is_file():
-        print(f"FBX not found: {fbx_path}", file=sys.stderr)
+    if not skin_glb.is_file():
+        print(f"skin.glb not found: {skin_glb}", file=sys.stderr)
         return 1
     if not photo_path.is_file():
         print(f"Photo not found: {photo_path}", file=sys.stderr)
         return 1
 
-    mesh = load_fbx_face_mesh(fbx_path)
+    mesh = load_lam_skin_glb(skin_glb)
     texture = np.asarray(Image.open(photo_path).convert("RGB"))
     height, width = texture.shape[:2]
 
@@ -114,13 +122,15 @@ def main() -> int:
         texture=texture,
         blendshape_names=ARKIT_BLENDSHAPE_NAMES,
         meta={
-            "source_fbx": str(fbx_path.resolve()),
+            "source_type": "lam_glb",
+            "source_skin_glb": str(skin_glb.resolve()),
             "source_photo": str(photo_path.resolve()),
             "image_width": width,
             "image_height": height,
             "fit_margin": args.margin,
             "missing_shapes": missing,
-            "num_shapes_in_fbx": len(mesh.shapes),
+            "morph_names": sorted(mesh.morph_deltas_3d.keys()),
+            "num_morphs": len(mesh.morph_deltas_3d),
         },
     )
 
