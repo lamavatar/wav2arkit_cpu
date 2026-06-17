@@ -21,6 +21,69 @@
         android:fontFamily="monospace"
         android:text="" />
 
+    <TextView
+        android:id="@+id/audioLabel"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingHorizontal="8dp"
+        android:textColor="#AAAAAA"
+        android:textSize="12sp"
+        android:text="No audio selected" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:padding="8dp">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/pickAudioButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Pick audio" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/startButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="4dp"
+            android:enabled="false"
+            android:text="Start" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/stopButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="4dp"
+            android:enabled="false"
+            android:text="Stop" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:paddingHorizontal="8dp"
+        android:paddingBottom="4dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="#E0E0E0"
+            android:textSize="13sp"
+            android:text="Prebuffer (s):" />
+
+        <EditText
+            android:id="@+id/prebufferInput"
+            android:layout_width="64dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:inputType="numberDecimal"
+            android:text="1.0"
+            android:textColor="#E0E0E0"
+            android:textSize="13sp" />
+    </LinearLayout>
+
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -59,7 +122,7 @@
             android:textColor="#9CDCFE"
             android:textSize="12sp"
             android:fontFamily="monospace"
-            android:text="Tap Run Benchmark to sweep CPU worker threads.\n" />
+            android:text="Pick audio (same clip as baked bsData), set prebuffer seconds, then Start.\n" />
     </ScrollView>
 
 </LinearLayout>

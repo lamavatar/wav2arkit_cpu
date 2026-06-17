@@ -89,6 +89,24 @@ class InstanceBuilder(private val pack: AvatarPack) {
         return compactSortPack(indices, len)
     }
 
+    /** Build and copy instance bytes into an immutable [CachedFrame]. */
+    fun buildCached(
+        frameIndex: Int,
+        weights: FloatArray,
+        indices: IntArray,
+        exec: ExecutorService,
+        threads: Int,
+    ): CachedFrame {
+        val count = build(weights, indices, exec, threads)
+        val size = count * 40
+        val bytes = ByteArray(size)
+        instanceBytes.position(0)
+        if (size > 0) {
+            instanceBytes.get(bytes, 0, size)
+        }
+        return CachedFrame(frameIndex, count, bytes)
+    }
+
     private fun processRange(
         from: Int, to: Int, indices: IntArray, mi: IntArray, mw: FloatArray, nz: Int,
     ) {

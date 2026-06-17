@@ -2,7 +2,6 @@ package com.example.splatbench
 
 import android.opengl.GLES30
 import android.opengl.GLSurfaceView
-import android.os.SystemClock
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.ExecutorService
@@ -23,11 +22,15 @@ import kotlin.math.tan
 class SplatRenderer(
     private val pack: AvatarPack,
     private val callbacks: Callbacks,
+    private val playback: PlaybackController,
+    private val frameCache: FrameCache,
+    private val prefetchBuilder: InstanceBuilder,
 ) : GLSurfaceView.Renderer {
 
     interface Callbacks {
         fun onLiveStats(text: String)
         fun onBenchmarkDone(report: String)
+        fun onPlaybackState(message: String) {}
     }
 
     data class BenchRequest(val mouthOnly: Boolean, val threads: IntArray, val framesPerSetting: Int)
@@ -69,9 +72,12 @@ class SplatRenderer(
     // live preview
     private val liveThreads = Runtime.getRuntime().availableProcessors().coerceAtMost(8)
     private var liveExec: ExecutorService = Executors.newFixedThreadPool(liveThreads)
-    private var startMs = 0L
     private var liveFrameTick = 0
     private val bgR = 0.063f; private val bgG = 0.063f; private val bgB = 0.078f
+
+    @Volatile private var lastGoodCached: CachedFrame? = null
+    private val uploadScratch: ByteBuffer =
+        ByteBuffer.allocateDirect(pack.numGaussians * 10 * 4).order(ByteOrder.nativeOrder())
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         splatProg = link(SPLAT_VS, SPLAT_FS)
@@ -101,7 +107,6 @@ class SplatRenderer(
 
         GLES30.glDisable(GLES30.GL_DEPTH_TEST)
         GLES30.glDisable(GLES30.GL_CULL_FACE)
-        startMs = SystemClock.elapsedRealtime()
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
@@ -144,6 +149,23 @@ class SplatRenderer(
 
         fy = (sq * 0.5f) / tan(fovy * 0.5f)
         builder.setView(rot, tv, fy, sq * 0.5f, sq * 0.5f, sq.toFloat(), sq.toFloat())
+        syncPrefetchView()
+    }
+
+    /** Push the current camera/view to the off-GL prefetch builder. */
+    fun syncPrefetchView() {
+        prefetchBuilder.setView(rot, tv, fy, sq * 0.5f, sq * 0.5f, sq.toFloat(), sq.toFloat())
+    }
+
+    /** GL-thread: bake the static mouth-only base layer before synced playback. */
+    fun ensureStaticBase() {
+        if (!liveMouthOnly) return
+        baseReady = false
+        ensureBase()
+    }
+
+    fun invalidateStaticBase() {
+        baseReady = false
     }
 
     private fun setupBaseFbo() {
@@ -209,35 +231,63 @@ class SplatRenderer(
         val mouthOnly = liveMouthOnly
         if (mouthOnly) ensureBase()
 
-        val elapsed = (SystemClock.elapsedRealtime() - startMs) / 1000.0
-        val frame = ((elapsed * pack.fps).toInt() % pack.numFrames)
-        val w = pack.frameWeights(frame)
-        val indices = if (mouthOnly) pack.dynamicIndices else pack.allIndices
+        val state = playback.state
+        val frameIdx = when (state) {
+            PlaybackState.PLAYING, PlaybackState.DONE -> playback.currentFrameIndex(pack)
+            else -> 0
+        }
 
-        val t0 = System.nanoTime()
-        val count = build(w, indices, liveThreads)
-        val buildMs = (System.nanoTime() - t0) / 1e6
+        var cached = frameCache.get(frameIdx)
+        if (cached == null) cached = lastGoodCached
+        if (cached != null) lastGoodCached = cached
 
-        renderToScreen(count, mouthOnly)
+        if (cached != null) {
+            renderCachedToScreen(cached, mouthOnly)
+        } else {
+            renderClear(mouthOnly)
+        }
 
         if (++liveFrameTick % 15 == 0) {
-            val txt = "live  mode=${if (mouthOnly) "mouth" else "full "}  threads=$liveThreads  " +
-                "splats=$count  build=${"%.1f".format(buildMs)} ms"
+            val mode = when (state) {
+                PlaybackState.PLAYING -> "play "
+                PlaybackState.PREBUFFERING -> "prep "
+                PlaybackState.DONE -> "done "
+                else -> "idle "
+            }
+            val txt = "$mode mode=${if (mouthOnly) "mouth" else "full "}  " +
+                "frame=$frameIdx  audio=${playback.audioPositionMs}ms  " +
+                "cache=${frameCache.size()}  splats=${cached?.instanceCount ?: 0}"
             callbacks.onLiveStats(txt)
         }
     }
 
-    private fun renderToScreen(count: Int, mouthOnly: Boolean) {
+    private fun renderClear(mouthOnly: Boolean) {
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+        GLES30.glViewport(0, 0, surfW, surfH)
+        GLES30.glClearColor(bgR, bgG, bgB, 1f)
+        GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
+        if (mouthOnly && baseReady) {
+            GLES30.glViewport(ox, oy, sq, sq)
+            drawQuad(baseTex)
+        }
+    }
+
+    private fun renderCachedToScreen(cached: CachedFrame, mouthOnly: Boolean) {
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
         GLES30.glViewport(0, 0, surfW, surfH)
         GLES30.glClearColor(bgR, bgG, bgB, 1f)
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
         GLES30.glViewport(ox, oy, sq, sq)
         if (mouthOnly) drawQuad(baseTex)
-        // dynamic instances were already uploaded for non-mouth path? upload here:
-        GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, instVbo)
-        GLES30.glBufferData(GLES30.GL_ARRAY_BUFFER, count * 40, builder.instanceBytes, GLES30.GL_DYNAMIC_DRAW)
-        drawSplats(instVbo, count)
+        val size = cached.instanceCount * 40
+        if (size > 0) {
+            uploadScratch.clear()
+            uploadScratch.put(cached.bytes, 0, size)
+            uploadScratch.position(0)
+            GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, instVbo)
+            GLES30.glBufferData(GLES30.GL_ARRAY_BUFFER, size, uploadScratch, GLES30.GL_DYNAMIC_DRAW)
+            drawSplats(instVbo, cached.instanceCount)
+        }
     }
 
     private fun drawSplats(vbo: Int, count: Int) {
