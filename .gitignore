@@ -1,4 +1,5 @@
 models/
+avatar_registry/models/
 __pycache__/
 *.pyc
 output/
@@ -24,3 +25,5 @@ output/
 *.parquet
 *.pb
 *.pickle
+out/
+packs/

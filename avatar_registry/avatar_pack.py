@@ -25,6 +25,7 @@ class AvatarPack:
     texture: np.ndarray  # (H, W, 3) uint8 RGB
     blendshape_names: list[str]
     meta: dict
+    face_mask: np.ndarray | None = None  # (H, W) uint8 0-255, optional
 
     @property
     def num_vertices(self) -> int:
@@ -52,6 +53,9 @@ def save_avatar_pack(pack: AvatarPack, output_dir: str | Path) -> Path:
 
     Image.fromarray(pack.texture).save(output_dir / "texture.png")
 
+    if pack.face_mask is not None:
+        np.save(output_dir / "face_mask.npy", pack.face_mask.astype(np.uint8))
+
     meta = dict(pack.meta)
     meta["blendshape_names"] = pack.blendshape_names
     meta["num_vertices"] = pack.num_vertices
@@ -72,6 +76,8 @@ def load_avatar_pack(pack_dir: str | Path) -> AvatarPack:
         meta = json.load(f)
 
     texture = np.asarray(Image.open(pack_dir / "texture.png").convert("RGB"))
+    face_mask_path = pack_dir / "face_mask.npy"
+    face_mask = np.load(face_mask_path) if face_mask_path.is_file() else None
     return AvatarPack(
         neutral_2d=np.load(pack_dir / "neutral_2d.npy"),
         triangles=np.load(pack_dir / "triangles.npy"),
@@ -79,4 +85,5 @@ def load_avatar_pack(pack_dir: str | Path) -> AvatarPack:
         texture=texture,
         blendshape_names=meta.get("blendshape_names", ARKIT_BLENDSHAPE_NAMES),
         meta=meta,
+        face_mask=face_mask,
     )

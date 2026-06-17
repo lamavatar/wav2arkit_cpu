@@ -23,6 +23,7 @@ _TYPE_COMPONENTS = {
     "VEC2": 2,
     "VEC3": 3,
     "VEC4": 4,
+    "MAT4": 16,
 }
 
 

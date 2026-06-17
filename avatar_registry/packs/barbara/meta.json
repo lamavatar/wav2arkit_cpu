@@ -5,6 +5,29 @@
   "image_width": 1024,
   "image_height": 1024,
   "fit_margin": 0.08,
+  "fit_scale": 388756.5638993439,
+  "align_mode": "landmark",
+  "alignment_method": "similarity",
+  "alignment_iterations": 3,
+  "alignment_rms_px": 7.161,
+  "mesh_landmark_indices": {
+    "forehead": 3530,
+    "nose": 7447,
+    "left_eye": 14136,
+    "right_eye": 10756,
+    "mouth_left": 12175,
+    "mouth_right": 7396,
+    "chin": 11327
+  },
+  "photo_landmark_names": [
+    "forehead",
+    "nose",
+    "left_eye",
+    "right_eye",
+    "mouth_left",
+    "mouth_right",
+    "chin"
+  ],
   "missing_shapes": [
     "tongueOut"
   ],

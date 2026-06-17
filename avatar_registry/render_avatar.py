@@ -35,7 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Render avatar pack with bsData.json")
     parser.add_argument(
         "--pack",
-        default=str(ROOT / "avatar_registry" / "packs" / "barbara"),
+        default=str(ROOT / "avatar_registry" / "packs" / "vfhq_case1"),
         help="Avatar pack directory",
     )
     parser.add_argument(
@@ -45,13 +45,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-dir",
-        default=str(ROOT / "avatar_registry" / "output" / "barbara_frames"),
+        default=str(ROOT / "avatar_registry" / "output" / "vfhq_case1_frames"),
         help="Directory for rendered PNG frames",
     )
     parser.add_argument(
         "--max-frames",
         type=int,
-        default=0,
+        default=10,
         help="Limit frames (0 = all)",
     )
     parser.add_argument(
@@ -59,6 +59,11 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help="Render every Nth frame (default: 1)",
+    )
+    parser.add_argument(
+        "--composite",
+        action="store_true",
+        help="Composite warped face over original photo using pack face_mask",
     )
     return parser.parse_args()
 
@@ -98,6 +103,8 @@ def main() -> int:
             pack.neutral_2d,
             verts,
             pack.triangles,
+            composite=args.composite,
+            face_mask=pack.face_mask,
         )
         out_path = output_dir / f"frame_{frame_idx:05d}.png"
         cv2.imwrite(str(out_path), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))

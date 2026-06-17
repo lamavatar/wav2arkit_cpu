@@ -36,6 +36,11 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Optional PNG output path for debug render",
     )
+    parser.add_argument(
+        "--composite",
+        action="store_true",
+        help="Composite warped face over original photo using pack face_mask",
+    )
     return parser.parse_args()
 
 
@@ -70,8 +75,19 @@ def main() -> int:
         weights[morph_idx] = 1.0
 
     deformed = pack.deform(weights)
+    if args.morph not in missing:
+        disp = np.linalg.norm(deformed - pack.neutral_2d, axis=1)
+        print(f"  morph={args.morph} max_disp_px={float(disp.max()):.2f} mean_disp_px={float(disp.mean()):.4f}")
+
     if args.output:
-        image = render_mesh_frame(pack.texture, pack.neutral_2d, deformed, pack.triangles)
+        image = render_mesh_frame(
+            pack.texture,
+            pack.neutral_2d,
+            deformed,
+            pack.triangles,
+            composite=args.composite,
+            face_mask=pack.face_mask,
+        )
         out_path = Path(args.output)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         import cv2
