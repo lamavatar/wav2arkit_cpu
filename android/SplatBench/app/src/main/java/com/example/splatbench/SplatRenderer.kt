@@ -2,7 +2,6 @@ package com.example.splatbench
 
 import android.opengl.GLES30
 import android.opengl.GLSurfaceView
-import android.os.SystemClock
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.ExecutorService
@@ -13,31 +12,22 @@ import kotlin.math.min
 import kotlin.math.sqrt
 import kotlin.math.tan
 
-/**
- * GLES 3.x EWA Gaussian-splat renderer (instanced quads, premultiplied "over"
- * blending) for the LAM avatar, plus a CPU-thread benchmark harness.
- *
- * The avatar is rendered into a centered square viewport so the projection
- * matches the desktop `gaussian_splat.py` (which assumes a square frame).
- */
+/** GLES 3.x EWA Gaussian-splat renderer for the LAM avatar. */
 class SplatRenderer(
     private val pack: AvatarPack,
     private val callbacks: Callbacks,
+    private val playback: PlaybackController,
+    private val frameCache: FrameCache,
+    private val prefetchBuilder: InstanceBuilder,
 ) : GLSurfaceView.Renderer {
 
     interface Callbacks {
-        fun onLiveStats(text: String)
-        fun onBenchmarkDone(report: String)
+        fun onStats(line1: String, line2: String, line3: String)
     }
 
-    data class BenchRequest(val mouthOnly: Boolean, val threads: IntArray, val framesPerSetting: Int)
+    private val mouthOnly = AppConfig.MOUTH_ONLY
+    private val buildThreads = AppConfig.BUILD_THREADS
 
-    @Volatile var liveMouthOnly: Boolean = false
-    @Volatile private var benchRequest: BenchRequest? = null
-
-    fun requestBenchmark(req: BenchRequest) { benchRequest = req }
-
-    // --- GL objects ---
     private var splatProg = 0
     private var quadProg = 0
     private var vao = 0
@@ -51,7 +41,6 @@ class SplatRenderer(
     private var uViewport = 0
     private var uTex = 0
 
-    // --- geometry / camera ---
     private var surfW = 1
     private var surfH = 1
     private var sq = 1
@@ -66,12 +55,12 @@ class SplatRenderer(
     private var staticCount = 0
     private var baseReady = false
 
-    // live preview
-    private val liveThreads = Runtime.getRuntime().availableProcessors().coerceAtMost(8)
-    private var liveExec: ExecutorService = Executors.newFixedThreadPool(liveThreads)
-    private var startMs = 0L
-    private var liveFrameTick = 0
+    private var liveExec: ExecutorService = Executors.newFixedThreadPool(buildThreads)
     private val bgR = 0.063f; private val bgG = 0.063f; private val bgB = 0.078f
+
+    @Volatile private var lastGoodCached: CachedFrame? = null
+    private val uploadScratch: ByteBuffer =
+        ByteBuffer.allocateDirect(pack.numGaussians * 10 * 4).order(ByteOrder.nativeOrder())
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         splatProg = link(SPLAT_VS, SPLAT_FS)
@@ -79,17 +68,15 @@ class SplatRenderer(
         uViewport = GLES30.glGetUniformLocation(splatProg, "viewport")
         uTex = GLES30.glGetUniformLocation(quadProg, "tex")
 
-        val ids = IntArray(5)
+        val ids = IntArray(4)
         GLES30.glGenBuffers(4, ids, 0)
         cornerVbo = ids[0]; instVbo = ids[1]; staticVbo = ids[2]; quadVbo = ids[3]
         val vaos = IntArray(2)
         GLES30.glGenVertexArrays(2, vaos, 0)
         vao = vaos[0]; quadVao = vaos[1]
 
-        // unit quad corners for the splat (two triangles)
         val corners = floatArrayOf(-1f, -1f, 1f, -1f, 1f, 1f, -1f, -1f, 1f, 1f, -1f, 1f)
         uploadStatic(cornerVbo, corners)
-        // fullscreen quad (triangle strip) for the base texture
         val fs = floatArrayOf(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)
         uploadStatic(quadVbo, fs)
 
@@ -101,14 +88,13 @@ class SplatRenderer(
 
         GLES30.glDisable(GLES30.GL_DEPTH_TEST)
         GLES30.glDisable(GLES30.GL_CULL_FACE)
-        startMs = SystemClock.elapsedRealtime()
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
         surfW = width; surfH = height
         sq = min(width, height)
         ox = (width - sq) / 2
-        oy = (height - sq) / 2
+        oy = 0
         setupCamera()
         setupBaseFbo()
         baseReady = false
@@ -124,13 +110,11 @@ class SplatRenderer(
         var fxd = (cxw - ex); var fyd = (cyw - ey); var fzd = (czw - ez)
         var nf = sqrt(fxd * fxd + fyd * fyd + fzd * fzd)
         fxd /= nf; fyd /= nf; fzd /= nf
-        // s = f x up
         var sxv = fyd * uz - fzd * uy
         var syv = fzd * ux - fxd * uz
         var szv = fxd * uy - fyd * ux
         val ns = sqrt(sxv * sxv + syv * syv + szv * szv)
         sxv /= ns; syv /= ns; szv /= ns
-        // u = s x f
         val uxv = syv * fzd - szv * fyd
         val uyv = szv * fxd - sxv * fzd
         val uzv = sxv * fyd - syv * fxd
@@ -144,6 +128,21 @@ class SplatRenderer(
 
         fy = (sq * 0.5f) / tan(fovy * 0.5f)
         builder.setView(rot, tv, fy, sq * 0.5f, sq * 0.5f, sq.toFloat(), sq.toFloat())
+        syncPrefetchView()
+    }
+
+    fun syncPrefetchView() {
+        prefetchBuilder.setView(rot, tv, fy, sq * 0.5f, sq * 0.5f, sq.toFloat(), sq.toFloat())
+    }
+
+    fun ensureStaticBase() {
+        if (!mouthOnly) return
+        baseReady = false
+        ensureBase()
+    }
+
+    fun invalidateStaticBase() {
+        baseReady = false
     }
 
     private fun setupBaseFbo() {
@@ -166,7 +165,6 @@ class SplatRenderer(
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
     }
 
-    /** Render the static (non-mouth) Gaussians once into the base texture. */
     private fun ensureBase() {
         if (baseReady) return
         val zero = FloatArray(pack.numMorphs)
@@ -194,50 +192,70 @@ class SplatRenderer(
         return out
     }
 
-    private fun build(weights: FloatArray, indices: IntArray, threads: Int = liveThreads): Int =
-        builder.build(weights, indices, liveExec, threads)
+    private fun build(weights: FloatArray, indices: IntArray): Int =
+        builder.build(weights, indices, liveExec, buildThreads)
 
     override fun onDrawFrame(gl: GL10?) {
-        val req = benchRequest
-        if (req != null) {
-            benchRequest = null
-            val report = runBenchmark(req)
-            callbacks.onBenchmarkDone(report)
-            return
-        }
-
-        val mouthOnly = liveMouthOnly
         if (mouthOnly) ensureBase()
 
-        val elapsed = (SystemClock.elapsedRealtime() - startMs) / 1000.0
-        val frame = ((elapsed * pack.fps).toInt() % pack.numFrames)
-        val w = pack.frameWeights(frame)
-        val indices = if (mouthOnly) pack.dynamicIndices else pack.allIndices
+        val state = playback.state
+        val frameIdx = when (state) {
+            PlaybackState.PLAYING, PlaybackState.DONE -> playback.currentFrameIndex(pack)
+            else -> 0
+        }
 
-        val t0 = System.nanoTime()
-        val count = build(w, indices, liveThreads)
-        val buildMs = (System.nanoTime() - t0) / 1e6
+        var cached = frameCache.get(frameIdx)
+        if (cached == null) cached = lastGoodCached
+        if (cached != null) lastGoodCached = cached
 
-        renderToScreen(count, mouthOnly)
+        if (cached != null) {
+            renderCachedToScreen(cached, mouthOnly)
+        } else {
+            renderClear(mouthOnly)
+        }
 
-        if (++liveFrameTick % 15 == 0) {
-            val txt = "live  mode=${if (mouthOnly) "mouth" else "full "}  threads=$liveThreads  " +
-                "splats=$count  build=${"%.1f".format(buildMs)} ms"
-            callbacks.onLiveStats(txt)
+        val mode = if (mouthOnly) "Mouth-only" else "Full"
+        val splats = cached?.instanceCount ?: if (mouthOnly && baseReady) staticCount else defaultSplatCount()
+        val line1 = "$mode | threads=$buildThreads | splats=$splats"
+        val line2 = if (cached != null) {
+            String.format("build: %.2f ms", cached.buildMs)
+        } else {
+            "build: — ms"
+        }
+        val line3 = String.format("audio: %d ms", playback.audioPositionMs)
+        callbacks.onStats(line1, line2, line3)
+    }
+
+    private fun defaultSplatCount(): Int =
+        if (mouthOnly) pack.dynamicIndices.size else pack.numGaussians
+
+    private fun renderClear(mouthOnly: Boolean) {
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+        GLES30.glViewport(0, 0, surfW, surfH)
+        GLES30.glClearColor(bgR, bgG, bgB, 1f)
+        GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
+        if (mouthOnly && baseReady) {
+            GLES30.glViewport(ox, oy, sq, sq)
+            drawQuad(baseTex)
         }
     }
 
-    private fun renderToScreen(count: Int, mouthOnly: Boolean) {
+    private fun renderCachedToScreen(cached: CachedFrame, mouthOnly: Boolean) {
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
         GLES30.glViewport(0, 0, surfW, surfH)
         GLES30.glClearColor(bgR, bgG, bgB, 1f)
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
         GLES30.glViewport(ox, oy, sq, sq)
         if (mouthOnly) drawQuad(baseTex)
-        // dynamic instances were already uploaded for non-mouth path? upload here:
-        GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, instVbo)
-        GLES30.glBufferData(GLES30.GL_ARRAY_BUFFER, count * 40, builder.instanceBytes, GLES30.GL_DYNAMIC_DRAW)
-        drawSplats(instVbo, count)
+        val size = cached.instanceCount * 40
+        if (size > 0) {
+            uploadScratch.clear()
+            uploadScratch.put(cached.bytes, 0, size)
+            uploadScratch.position(0)
+            GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, instVbo)
+            GLES30.glBufferData(GLES30.GL_ARRAY_BUFFER, size, uploadScratch, GLES30.GL_DYNAMIC_DRAW)
+            drawSplats(instVbo, cached.instanceCount)
+        }
     }
 
     private fun drawSplats(vbo: Int, count: Int) {
@@ -254,7 +272,6 @@ class SplatRenderer(
         GLES30.glVertexAttribDivisor(0, 0)
 
         GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, vbo)
-        // center(2) radius(1) conic(3) color(3) alpha(1) -> stride 40
         bindInstanceAttr(1, 2, 0)
         bindInstanceAttr(2, 1, 8)
         bindInstanceAttr(3, 3, 12)
@@ -283,78 +300,6 @@ class SplatRenderer(
         GLES30.glBindVertexArray(0)
     }
 
-    // ----------------------------------------------------------------------- #
-    // Benchmark: sweep CPU worker-thread counts, measure build + GPU time.
-    // ----------------------------------------------------------------------- #
-    private fun runBenchmark(req: BenchRequest): String {
-        if (req.mouthOnly) ensureBase()
-        val indices = if (req.mouthOnly) pack.dynamicIndices else pack.allIndices
-        val sb = StringBuilder()
-        sb.append("=== Benchmark (${if (req.mouthOnly) "mouth-only" else "full"}) ===\n")
-        sb.append("gaussians=${indices.size}/${pack.numGaussians}  viewport=${sq}x$sq  frames/setting=${req.framesPerSetting}\n")
-        sb.append(String.format("%-8s %-12s %-12s %-10s\n", "threads", "build(ms)", "gpu(ms)", "fps"))
-
-        var baseFps = 0.0
-        for ((si, threads) in req.threads.withIndex()) {
-            val exec = Executors.newFixedThreadPool(threads)
-            // warmup
-            repeat(8) { builder.build(pack.frameWeights(it), indices, exec, threads); drawForBench(req.mouthOnly) }
-
-            val builds = DoubleArray(req.framesPerSetting)
-            val totals = DoubleArray(req.framesPerSetting)
-            for (i in 0 until req.framesPerSetting) {
-                val w = pack.frameWeights(i)
-                val a = System.nanoTime()
-                val count = builder.build(w, indices, exec, threads)
-                val b = System.nanoTime()
-                uploadAndDraw(count, req.mouthOnly)
-                GLES30.glFinish()
-                val c = System.nanoTime()
-                builds[i] = (b - a) / 1e6
-                totals[i] = (c - a) / 1e6
-            }
-            exec.shutdownNow()
-
-            val buildMed = median(builds)
-            val totalMed = median(totals)
-            val gpuMed = (totalMed - buildMed).coerceAtLeast(0.0)
-            val fps = if (totalMed > 0) 1000.0 / totalMed else 0.0
-            if (si == 0) baseFps = fps
-            val speed = if (baseFps > 0) fps / baseFps else 1.0
-            sb.append(String.format(
-                "%-8d %-12.2f %-12.2f %-7.1f x%.2f\n",
-                threads, buildMed, gpuMed, fps, speed))
-        }
-        sb.append("(gpu(ms) is total-minus-build; rendering is into the live framebuffer)\n\n")
-        return sb.toString()
-    }
-
-    private fun uploadAndDraw(count: Int, mouthOnly: Boolean) {
-        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
-        GLES30.glViewport(0, 0, surfW, surfH)
-        GLES30.glClearColor(bgR, bgG, bgB, 1f)
-        GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
-        GLES30.glViewport(ox, oy, sq, sq)
-        if (mouthOnly) drawQuad(baseTex)
-        GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, instVbo)
-        GLES30.glBufferData(GLES30.GL_ARRAY_BUFFER, count * 40, builder.instanceBytes, GLES30.GL_DYNAMIC_DRAW)
-        drawSplats(instVbo, count)
-    }
-
-    private fun drawForBench(mouthOnly: Boolean) {
-        uploadAndDraw(builder.instanceCount, mouthOnly)
-        GLES30.glFinish()
-    }
-
-    private fun median(a: DoubleArray): Double {
-        val b = a.copyOf(); b.sort()
-        val n = b.size
-        return if (n == 0) 0.0 else if (n % 2 == 1) b[n / 2] else 0.5 * (b[n / 2 - 1] + b[n / 2])
-    }
-
-    // ----------------------------------------------------------------------- #
-    // GL helpers
-    // ----------------------------------------------------------------------- #
     private fun uploadStatic(vbo: Int, data: FloatArray) {
         val bb = ByteBuffer.allocateDirect(data.size * 4).order(ByteOrder.nativeOrder())
         bb.asFloatBuffer().put(data); bb.position(0)
