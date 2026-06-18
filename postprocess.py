@@ -6,15 +6,16 @@ import math
 import warnings
 from typing import Optional
 
+import librosa
 import numpy as np
 from scipy.signal import savgol_filter
 
 from export_utils import ARKIT_BLENDSHAPE_NAMES
 
-# LAM infer_streaming_audio: max_frame_length = 64 (~2.13s expression context)
-MAX_CONTEXT_FRAMES = 36
+# LAM infer_streaming_audio: previous_expression kept at max_frame_length = 64
+MAX_CONTEXT_FRAMES = 64
 
-# LAM default overlap for 1s chunks: 64/30 s window - 1s ≈ 1133 ms
+# Realtime streaming: 200 ms audio overlap + 1 s chunk => 1.2 s ONNX input window
 DEFAULT_OVERLAP_MS = 200
 
 ARKIT_LEFT_RIGHT_PAIR = [
@@ -90,19 +91,21 @@ def compute_chunk_volume(
     sample_rate: int = 16000,
     fps: float = 30.0,
 ) -> np.ndarray:
-    """Per-frame RMS volume (LAM-compatible hop)."""
+    """Per-frame RMS volume (matches LAM infer_streaming_audio librosa RMS)."""
     if len(audio) == 0:
         return np.zeros(0, dtype=np.float32)
-    hop = max(1, int(sample_rate / fps))
-    frame_len = max(1, min(hop, len(audio)))
-    n_frames = math.ceil(len(audio) / hop)
-    volume = np.zeros(n_frames, dtype=np.float32)
-    for i in range(n_frames):
-        seg = audio[i * hop : i * hop + frame_len]
-        if len(seg):
-            volume[i] = float(np.sqrt(np.mean(seg**2)))
-    expected = math.ceil(len(audio) / sample_rate * fps)
-    return volume[:expected]
+
+    hop_length = int(sample_rate / fps)
+    frame_length = min(hop_length, len(audio))
+    volume = librosa.feature.rms(
+        y=audio,
+        frame_length=frame_length,
+        hop_length=hop_length,
+    )[0]
+    frame_count = math.ceil(len(audio) / sample_rate * fps)
+    if volume.shape[0] > frame_count:
+        volume = volume[:frame_count]
+    return volume.astype(np.float32, copy=False)
 
 
 def symmetrize_blendshapes(

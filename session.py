@@ -22,6 +22,8 @@ DEFAULT_ONNX_PATH = DEFAULT_MODEL_DIR / "wav2arkit_cpu_int8.onnx"
 # DEFAULT_ONNX_PATH = DEFAULT_MODEL_DIR / "wav2arkit_cpu.onnx"
 AUDIO_SR = 16000
 OUTPUT_FPS = 30.0
+# Identity one-hot index baked into the exported ONNX graph (see models/config.json)
+DEFAULT_IDENTITY_INDEX = 11
 
 # ORT CPU thread pinning (reduces run-to-run variance on shared hosts)
 DEFAULT_INTRA_OP_THREADS = 4
@@ -177,12 +179,9 @@ class Wav2ArkitOnnxSession:
         input_audio = self._build_overlap_input(in_audio, context, overlap_samples)
         out_exp = self.infer_chunk(input_audio)
         out_exp = self._slice_new_frames(out_exp, len(in_audio))
-        start =  time.perf_counter();
         out_exp = self._postprocess_chunk(
             out_exp, volume, context, max_context_frames=max_context_frames
         )
-        end = time.perf_counter();
-        print(f"postprocess_chunk time: {(end - start)* 1000:.1f} milliseconds") 
         return out_exp, context
 
     def infer_streaming(

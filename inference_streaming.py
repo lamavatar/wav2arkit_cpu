@@ -40,12 +40,12 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="wav2arkit_cpu ONNX streaming inference")
     p.add_argument(
         "--audio",
-        default="BarackObama_english.wav",
+        default="zaizhong.wav",
         help="Input audio file path (any format librosa supports)",
     )
     p.add_argument(
         "--output",
-        default="bsData_onnx.json",
+        default="bsData_onnx_zaizhong.json",
         help="Output ARKit blendshape JSON path (default: bsData_onnx.json)",
     )
     p.add_argument(
