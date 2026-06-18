@@ -5,6 +5,7 @@ data class CachedFrame(
     val frameIndex: Int,
     val instanceCount: Int,
     val bytes: ByteArray,
+    val buildMs: Double = 0.0,
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true

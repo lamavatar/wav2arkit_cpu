@@ -9,6 +9,7 @@ import android.os.Looper
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.WindowCompat
 import com.example.splatbench.databinding.ActivityMainBinding
 import kotlin.concurrent.thread
 
@@ -32,9 +33,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
             val mp = mediaPlayer
             if (playback.state == PlaybackState.PLAYING && mp != null) {
                 try {
-                    if (mp.isPlaying) {
-                        playback.updateAudioPositionMs(mp.currentPosition)
-                    }
+                    playback.updateAudioPositionMs(mp.currentPosition)
                 } catch (_: IllegalStateException) {
                 }
                 mainHandler.postDelayed(this, 16L)
@@ -50,47 +49,50 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
                 android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION,
             )
         } catch (_: SecurityException) {
-            // Some providers do not allow persistable permission; read still works this session.
         }
         releaseMediaPlayer()
         audioUri = uri
         playback.state = PlaybackState.READY
         binding.audioLabel.text = "Audio: ${uri.lastPathSegment ?: uri}"
         updateControls()
-        binding.results.append("audio selected: $uri\n")
         rebuildPreview()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WindowCompat.setDecorFitsSystemWindows(window, true)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        binding.results.text = "loading avatar asset...\n"
-        binding.benchButton.isEnabled = false
         binding.pickAudioButton.isEnabled = false
+        updateStatLines(splats = null, buildMs = null, audioMs = 0)
         updateControls()
 
         binding.pickAudioButton.setOnClickListener {
             pickAudio.launch(arrayOf("audio/*"))
         }
-        binding.startButton.setOnClickListener { startPlayback() }
-        binding.stopButton.setOnClickListener { stopPlayback(userInitiated = true) }
+        binding.playButton.setOnClickListener { togglePlayback() }
 
-        thread {
-            val p = AvatarPack.load(assets, ASSET_NAME)
-            runOnUiThread { setupGl(p) }
+        thread(name = "avatar-load") {
+            try {
+                val p = AvatarPack.load(assets, AppConfig.SPLAT_ASSET)
+                runOnUiThread { setupGl(p) }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    Toast.makeText(this, e.message ?: "avatar load failed", Toast.LENGTH_LONG).show()
+                }
+            }
         }
     }
 
     private fun setupGl(p: AvatarPack) {
         pack = p
-        val nproc = Runtime.getRuntime().availableProcessors().coerceAtMost(8)
+        playback.prebufferSeconds = AppConfig.PREBUFFER_SECONDS
         val pf = FramePrefetcher(
             pack = p,
             cache = frameCache,
             controller = playback,
-            buildThreads = nproc,
+            buildThreads = AppConfig.BUILD_THREADS,
         )
         prefetcher = pf
 
@@ -101,57 +103,35 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         view.setRenderer(r)
         view.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
         glView = view
+        view.onResume()
 
-        binding.mouthSwitch.setOnCheckedChangeListener { _, _ ->
-            if (playback.state == PlaybackState.IDLE || playback.state == PlaybackState.READY) {
-                r.invalidateStaticBase()
-                rebuildPreview()
-            }
-        }
-
-        val benchThreads = sortedSetOf(1, 2, 4).apply {
-            add(Runtime.getRuntime().availableProcessors())
-            if (Runtime.getRuntime().availableProcessors() >= 8) add(8)
-        }.filter { it <= Runtime.getRuntime().availableProcessors() }.toIntArray()
-        val framesPerSetting = minOf(p.numFrames, 120)
-
-        binding.benchButton.setOnClickListener {
-            if (playback.state == PlaybackState.PLAYING ||
-                playback.state == PlaybackState.PREBUFFERING
-            ) {
-                return@setOnClickListener
-            }
-            binding.benchButton.isEnabled = false
-            val mouthOnly = binding.mouthSwitch.isChecked
-            binding.results.append(
-                "running benchmark (${if (mouthOnly) "mouth-only" else "full"}), " +
-                    "threads=${benchThreads.joinToString(",")} ...\n"
-            )
-            r.requestBenchmark(SplatRenderer.BenchRequest(mouthOnly, benchThreads, framesPerSetting))
-        }
-
-        binding.benchButton.isEnabled = true
         binding.pickAudioButton.isEnabled = true
         playback.state = PlaybackState.IDLE
-        binding.results.append(
-            "ready: ${p.numGaussians} gaussians, ${p.numFrames} frames @ ${p.fps}fps, " +
-                "${p.dynamicIndices.size} dynamic. cores=$nproc\n\n"
-        )
+        updateStatLines(splats = splatCount(p), buildMs = null, audioMs = 0)
         rebuildPreview()
         updateControls()
     }
 
+    private fun togglePlayback() {
+        when (playback.state) {
+            PlaybackState.PREBUFFERING, PlaybackState.PLAYING -> stopPlayback()
+            else -> startPlayback()
+        }
+    }
+
     private fun rebuildPreview() {
         val pf = prefetcher ?: return
-        val mouthOnly = binding.mouthSwitch.isChecked
-        glView?.queueEvent {
-            renderer?.syncPrefetchView()
-            if (mouthOnly) renderer?.ensureStaticBase()
-        }
+        val mouthOnly = AppConfig.MOUTH_ONLY
         pf.cancel()
         frameCache.clear()
         pf.resetCancel()
-        pf.buildPreviewFrame(0, mouthOnly, previewListener)
+        glView?.queueEvent {
+            renderer?.syncPrefetchView()
+            if (mouthOnly) renderer?.ensureStaticBase()
+            runOnUiThread {
+                pf.buildPreviewFrame(0, mouthOnly, previewListener)
+            }
+        }
     }
 
     private val previewListener = object : FramePrefetcher.Listener {
@@ -162,27 +142,19 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         }
     }
 
-    private fun readPrebufferSeconds(): Float {
-        val raw = binding.prebufferInput.text?.toString()?.trim() ?: "1.0"
-        return raw.toFloatOrNull()?.coerceIn(0.1f, 30f) ?: 1.0f
-    }
-
     private fun startPlayback() {
         if (audioUri == null) {
             Toast.makeText(this, "Pick an audio file first", Toast.LENGTH_SHORT).show()
             return
         }
         val pf = prefetcher ?: return
-        val p = pack ?: return
-        val mouthOnly = binding.mouthSwitch.isChecked
-        playback.prebufferSeconds = readPrebufferSeconds()
+        val mouthOnly = AppConfig.MOUTH_ONLY
+        playback.prebufferSeconds = AppConfig.PREBUFFER_SECONDS
         playback.resetAudioPosition()
         playback.state = PlaybackState.PREBUFFERING
         pf.cancel()
         pf.stopLeadPrefetch()
         updateControls()
-        val prebufferFrames = playback.frameCountForSeconds(playback.prebufferSeconds, p.fps)
-        binding.results.append("prebuffering ${playback.prebufferSeconds}s ($prebufferFrames frames)...\n")
 
         glView?.queueEvent {
             renderer?.syncPrefetchView()
@@ -195,8 +167,13 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
 
     private val prebufferListener = object : FramePrefetcher.Listener {
         override fun onPrebufferProgress(built: Int, total: Int) {
+            val last = frameCache.get(built - 1)
             runOnUiThread {
-                binding.liveStats.text = "Preparing: $built / $total frames"
+                updateStatLines(
+                    splats = last?.instanceCount ?: splatCount(pack),
+                    buildMs = last?.buildMs,
+                    audioMs = 0,
+                )
             }
         }
 
@@ -209,7 +186,6 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
                 playback.state = PlaybackState.READY
                 updateControls()
                 Toast.makeText(this@MainActivity, message, Toast.LENGTH_SHORT).show()
-                binding.results.append("prebuffer error: $message\n")
             }
         }
     }
@@ -217,7 +193,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
     private fun beginAudioAndPlayback() {
         val uri = audioUri ?: return
         val pf = prefetcher ?: return
-        val mouthOnly = binding.mouthSwitch.isChecked
+        val mouthOnly = AppConfig.MOUTH_ONLY
 
         releaseMediaPlayer()
         val mp = MediaPlayer()
@@ -229,7 +205,6 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
                 pf.stopLeadPrefetch()
                 stopPositionUpdates()
                 updateControls()
-                binding.results.append("playback finished\n")
             }
             mp.setOnPreparedListener {
                 playback.resetAudioPosition()
@@ -238,7 +213,6 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
                 updateControls()
                 startPositionUpdates()
                 pf.startLeadPrefetch(mouthOnly)
-                binding.results.append("playing (audio + avatar synced)\n")
             }
             mp.prepareAsync()
         } catch (e: Exception) {
@@ -257,7 +231,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         mainHandler.removeCallbacks(positionRunnable)
     }
 
-    private fun stopPlayback(userInitiated: Boolean) {
+    private fun stopPlayback() {
         prefetcher?.cancel()
         prefetcher?.stopLeadPrefetch()
         stopPositionUpdates()
@@ -265,10 +239,8 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         playback.resetAudioPosition()
         playback.state = if (audioUri != null) PlaybackState.READY else PlaybackState.IDLE
         frameCache.clear()
+        updateStatLines(splats = splatCount(pack), buildMs = null, audioMs = 0)
         updateControls()
-        if (userInitiated) {
-            binding.results.append("stopped\n")
-        }
         rebuildPreview()
     }
 
@@ -286,25 +258,37 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
     private fun updateControls() {
         val state = playback.state
         val busy = state == PlaybackState.PREBUFFERING || state == PlaybackState.PLAYING
-        binding.startButton.isEnabled = audioUri != null && !busy
-        binding.stopButton.isEnabled = busy || state == PlaybackState.DONE
+        binding.playButton.text = if (busy) "Stop" else "Start"
+        binding.playButton.isEnabled = busy || audioUri != null
         binding.pickAudioButton.isEnabled = !busy
-        binding.prebufferInput.isEnabled = !busy
-        binding.mouthSwitch.isEnabled = !busy
-        binding.benchButton.isEnabled = !busy
     }
 
-    override fun onLiveStats(text: String) {
-        if (playback.state != PlaybackState.PREBUFFERING) {
-            runOnUiThread { binding.liveStats.text = text }
-        }
-    }
-
-    override fun onBenchmarkDone(report: String) {
+    override fun onStats(line1: String, line2: String, line3: String) {
         runOnUiThread {
-            binding.results.append(report)
-            updateControls()
+            binding.statLine1.text = line1
+            binding.statLine2.text = line2
+            if (playback.state != PlaybackState.PREBUFFERING) {
+                binding.statLine3.text = line3
+            }
         }
+    }
+
+    private fun updateStatLines(splats: Int?, buildMs: Double?, audioMs: Int) {
+        val p = pack
+        val mode = if (AppConfig.MOUTH_ONLY) "Mouth-only" else "Full"
+        val splatStr = (splats ?: p?.let { splatCount(it) } ?: 0).toString()
+        binding.statLine1.text = "$mode | threads=${AppConfig.BUILD_THREADS} | splats=$splatStr"
+        binding.statLine2.text = if (buildMs != null) {
+            String.format("build: %.2f ms", buildMs)
+        } else {
+            "build: — ms"
+        }
+        binding.statLine3.text = String.format("audio: %d ms", audioMs)
+    }
+
+    private fun splatCount(p: AvatarPack?): Int {
+        if (p == null) return 0
+        return if (AppConfig.MOUTH_ONLY) p.dynamicIndices.size else p.numGaussians
     }
 
     override fun onResume() {
@@ -326,12 +310,8 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
     }
 
     override fun onDestroy() {
-        stopPlayback(userInitiated = false)
+        stopPlayback()
         prefetcher?.shutdown()
         super.onDestroy()
-    }
-
-    companion object {
-        private const val ASSET_NAME = "vfhq_case1.splat"
     }
 }

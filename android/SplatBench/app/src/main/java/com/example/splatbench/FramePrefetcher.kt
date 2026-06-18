@@ -148,7 +148,9 @@ class FramePrefetcher(
     private fun buildFrame(frameIndex: Int, mouthOnly: Boolean, indices: IntArray? = null) {
         val idx = indices ?: renderIndices(mouthOnly)
         val weights = pack.frameWeights(frameIndex)
+        val t0 = System.nanoTime()
         val cached = builder.buildCached(frameIndex, weights, idx, exec, threadCount)
-        cache.put(cached)
+        val buildMs = (System.nanoTime() - t0) / 1_000_000.0
+        cache.put(cached.copy(buildMs = buildMs))
     }
 }

@@ -1,128 +1,95 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
-    android:background="#101014">
+    android:background="#101014"
+    android:fitsSystemWindows="true">
 
     <android.opengl.GLSurfaceView
         android:id="@+id/glView"
-        android:layout_width="match_parent"
+        android:layout_width="0dp"
         android:layout_height="0dp"
-        android:layout_weight="1" />
-
-    <TextView
-        android:id="@+id/liveStats"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:padding="8dp"
-        android:textColor="#E0E0E0"
-        android:textSize="13sp"
-        android:fontFamily="monospace"
-        android:text="" />
-
-    <TextView
-        android:id="@+id/audioLabel"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:paddingHorizontal="8dp"
-        android:textColor="#AAAAAA"
-        android:textSize="12sp"
-        android:text="No audio selected" />
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintDimensionRatio="1:1" />
 
     <LinearLayout
-        android:layout_width="match_parent"
+        android:id="@+id/controlPanel"
+        android:layout_width="0dp"
         android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:padding="8dp">
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/pickAudioButton"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Pick audio" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/startButton"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="4dp"
-            android:enabled="false"
-            android:text="Start" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/stopButton"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="4dp"
-            android:enabled="false"
-            android:text="Stop" />
-    </LinearLayout>
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:paddingHorizontal="8dp"
-        android:paddingBottom="4dp">
+        android:orientation="vertical"
+        android:paddingHorizontal="12dp"
+        android:paddingTop="8dp"
+        android:paddingBottom="12dp"
+        app:layout_constraintTop_toBottomOf="@id/glView"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintVertical_bias="0">
 
         <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:textColor="#E0E0E0"
-            android:textSize="13sp"
-            android:text="Prebuffer (s):" />
-
-        <EditText
-            android:id="@+id/prebufferInput"
-            android:layout_width="64dp"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:inputType="numberDecimal"
-            android:text="1.0"
-            android:textColor="#E0E0E0"
-            android:textSize="13sp" />
-    </LinearLayout>
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:padding="8dp">
-
-        <com.google.android.material.materialswitch.MaterialSwitch
-            android:id="@+id/mouthSwitch"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:textColor="#E0E0E0"
-            android:text="Mouth-only" />
-
-        <Space
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/benchButton"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Run Benchmark" />
-    </LinearLayout>
-
-    <ScrollView
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="0.9">
-
-        <TextView
-            android:id="@+id/results"
+            android:id="@+id/audioLabel"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:padding="10dp"
-            android:textColor="#9CDCFE"
+            android:textColor="#AAAAAA"
+            android:textSize="12sp"
+            android:text="No audio selected" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:orientation="horizontal">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/pickAudioButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Pick audio" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/playButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:enabled="false"
+                android:text="Start" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/statLine1"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:textColor="#E0E0E0"
             android:textSize="12sp"
             android:fontFamily="monospace"
-            android:text="Pick audio (same clip as baked bsData), set prebuffer seconds, then Start.\n" />
-    </ScrollView>
+            android:text="" />
 
-</LinearLayout>
+        <TextView
+            android:id="@+id/statLine2"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:textColor="#E0E0E0"
+            android:textSize="12sp"
+            android:fontFamily="monospace"
+            android:text="" />
+
+        <TextView
+            android:id="@+id/statLine3"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:textColor="#E0E0E0"
+            android:textSize="12sp"
+            android:fontFamily="monospace"
+            android:text="" />
+
+    </LinearLayout>
+
+</androidx.constraintlayout.widget.ConstraintLayout>
