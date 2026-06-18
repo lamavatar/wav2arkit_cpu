@@ -13,23 +13,40 @@ you can see how the CPU stage scales on the device.
 Target device used for design: Samsung SM-G975U1 (Snapdragon 855 / SM8150,
 Adreno 640, GLES 3.2, Android 12, arm64-v8a).
 
-## 1. Bake the avatar asset (already done once)
-
-The app reads a flat binary `vfhq_case1.splat` from `app/src/main/assets/`.
-It is produced from the LAM avatar pack by the Python baker:
+## 1. Bake the avatar asset
 
 ```bash
-# from the wav2arkit_cpu repo root
-python -m avatar_registry.bake_android \
-  --avatar avatar_registry/lam3d_avatar/vfhq_case1 \
+# from the wav2arkit_cpu repo root (SPL2 = geometry only, for ONNX lip-sync)
+python -m avatar_registry.bake_android --format spl2 --morph-set mouth \
   --output android/SplatBench/app/src/main/assets/vfhq_case1.splat
 ```
 
-The committed asset already contains 20,018 Gaussians, 51 morphs, 302 frames
-(~13 MB). Re-run the baker to use a different avatar (point `--avatar` at any
-pack with `offset.ply` + `skin.glb` + `bsData.json`).
+## 2. Copy files to `/sdcard/AvatarTalk/` (required)
 
-## 2. Build & run
+Create a folder **`AvatarTalk`** on the phone's main storage (same level as
+`Download`, `DCIM`, etc.) and copy:
+
+```
+/sdcard/AvatarTalk/wav2arkit_cpu_int8.onnx
+/sdcard/AvatarTalk/vfhq_case1.splat
+```
+
+**adb:**
+
+```bash
+adb shell mkdir -p /sdcard/AvatarTalk
+adb push models/wav2arkit_cpu_int8.onnx /sdcard/AvatarTalk/
+adb push android/SplatBench/app/src/main/assets/vfhq_case1.splat /sdcard/AvatarTalk/
+```
+
+Or copy via any file manager on the device.
+
+On first launch the app requests **All files access** (Android 11+) to read this
+folder. Filenames and folder name are set in
+[`AppConfig.kt`](app/src/main/java/com/example/splatbench/AppConfig.kt)
+(`AVATAR_TALK_DIR_NAME`, `ONNX_FILE_NAME`, `SPLAT_FILE_NAME`).
+
+## 3. Build & run
 
 Open `android/SplatBench/` in **Android Studio** (Giraffe+), let it sync (it
 will fetch Gradle 8.7 + AGP 8.5), then Run on the device. Or from CLI once a
@@ -41,7 +58,7 @@ gradle wrapper          # first time only (generates gradlew)
 ./gradlew installDebug  # build + install on a connected device
 ```
 
-## 3. Using the app
+## 4. Using the app
 
 - The avatar animates live at the top (vsync-limited preview).
 - Toggle **Mouth-only** to render only the dynamic (mouth/jaw) Gaussian subset

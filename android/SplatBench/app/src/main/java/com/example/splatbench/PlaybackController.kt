@@ -20,6 +20,9 @@ class PlaybackController {
     /** Seconds of frames to pre-build before audio starts (and as lead during playback). */
     @Volatile var prebufferSeconds: Float = 1.0f
 
+    /** Active weight source (baked SPL1 or runtime ONNX). Drives fps + frame count. */
+    @Volatile var expressionSource: ExpressionSource? = null
+
     var state: PlaybackState
         get() = stateRef.get()
         set(value) {
@@ -29,9 +32,13 @@ class PlaybackController {
     fun frameCountForSeconds(seconds: Float, fps: Float): Int =
         (seconds * fps).toInt().coerceAtLeast(1)
 
+    /** Frame index for the current clock position, clamped to the source's frame count. */
     fun currentFrameIndex(pack: AvatarPack): Int {
-        val f = (audioPositionMs / 1000.0 * pack.fps).toInt()
-        return f.coerceIn(0, pack.numFrames - 1)
+        val src = expressionSource
+        val fps = src?.fps ?: pack.fps
+        val f = (audioPositionMs / 1000.0 * fps).toInt()
+        val count = src?.frameCount() ?: pack.numFrames
+        return if (count <= 0) f.coerceAtLeast(0) else f.coerceIn(0, count - 1)
     }
 
     fun updateAudioPositionMs(posMs: Int) {

@@ -67,12 +67,14 @@ class FramePrefetcher(
                 cache.clear()
                 nextBuildIndex.set(0)
 
-                val total = controller.frameCountForSeconds(controller.prebufferSeconds, pack.fps)
-                    .coerceAtMost(pack.numFrames)
+                val src = source()
+                val total = controller.frameCountForSeconds(controller.prebufferSeconds, src.fps)
+                    .let { req -> val fc = src.frameCount(); if (fc > 0) req.coerceAtMost(fc) else req }
                 val indices = renderIndices(mouthOnly)
 
                 for (i in 0 until total) {
                     if (cancelled.get()) return@Thread
+                    if (!awaitFrame(i, src)) return@Thread
                     buildFrame(i, mouthOnly, indices)
                     nextBuildIndex.set(i + 1)
                     listener.onPrebufferProgress(i + 1, total)
@@ -86,11 +88,30 @@ class FramePrefetcher(
         }, "prefetch-prebuffer").start()
     }
 
+    private fun source(): ExpressionSource =
+        controller.expressionSource ?: BakedExpressionSource(pack)
+
+    /** Block until the expression source has [frame] ready, or cancel/EOF. */
+    private fun awaitFrame(frame: Int, src: ExpressionSource): Boolean {
+        while (!src.hasFrame(frame)) {
+            if (cancelled.get()) return false
+            val fc = src.frameCount()
+            if (fc in 1..frame) return false // past the end of a finished source
+            try {
+                Thread.sleep(8)
+            } catch (_: InterruptedException) {
+                return false
+            }
+        }
+        return true
+    }
+
     fun startLeadPrefetch(mouthOnly: Boolean) {
         if (!leadRunning.compareAndSet(false, true)) return
         val t = Thread({
             try {
                 val indices = renderIndices(mouthOnly)
+                val src = source()
                 while (leadRunning.get() && !cancelled.get()) {
                     val state = controller.state
                     if (state != PlaybackState.PLAYING) {
@@ -98,12 +119,15 @@ class FramePrefetcher(
                         continue
                     }
 
+                    val frameCount = src.frameCount()
                     val playbackFrame = controller.currentFrameIndex(pack)
-                    val lead = controller.frameCountForSeconds(controller.prebufferSeconds, pack.fps)
-                    val target = minOf(playbackFrame + lead, pack.numFrames - 1)
+                    val lead = controller.frameCountForSeconds(controller.prebufferSeconds, src.fps)
+                    var target = playbackFrame + lead
+                    if (frameCount > 0) target = minOf(target, frameCount - 1)
                     var idx = nextBuildIndex.get()
 
                     while (idx <= target && leadRunning.get() && !cancelled.get()) {
+                        if (!src.hasFrame(idx)) break // wait for more inference
                         if (!cache.has(idx)) {
                             buildFrame(idx, mouthOnly, indices)
                         }
@@ -111,8 +135,10 @@ class FramePrefetcher(
                         nextBuildIndex.set(idx)
                     }
 
-                    if (playbackFrame >= pack.numFrames - 1 &&
-                        controller.audioPositionMs >= clipDurationMs() - 50
+                    val dur = clipDurationMs(src)
+                    if (dur > 0 && frameCount > 0 &&
+                        playbackFrame >= frameCount - 1 &&
+                        controller.audioPositionMs >= dur - 50
                     ) {
                         break
                     }
@@ -139,15 +165,18 @@ class FramePrefetcher(
         exec.shutdownNow()
     }
 
-    private fun clipDurationMs(): Int =
-        ((pack.numFrames / pack.fps) * 1000.0).toInt()
+    private fun clipDurationMs(src: ExpressionSource): Int {
+        val fc = src.frameCount()
+        if (fc <= 0 || src.fps <= 0f) return 0
+        return ((fc / src.fps) * 1000.0).toInt()
+    }
 
     private fun renderIndices(mouthOnly: Boolean): IntArray =
         if (mouthOnly) pack.dynamicIndices else pack.allIndices
 
     private fun buildFrame(frameIndex: Int, mouthOnly: Boolean, indices: IntArray? = null) {
         val idx = indices ?: renderIndices(mouthOnly)
-        val weights = pack.frameWeights(frameIndex)
+        val weights = source().weightsForFrame(frameIndex)
         val t0 = System.nanoTime()
         val cached = builder.buildCached(frameIndex, weights, idx, exec, threadCount)
         val buildMs = (System.nanoTime() - t0) / 1_000_000.0

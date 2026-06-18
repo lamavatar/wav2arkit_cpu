@@ -30,8 +30,7 @@ android {
         jvmTarget = "17"
     }
 
-    // The .splat asset is already packed binary; keep it uncompressed so we can
-    // read it straight into a ByteBuffer at load time.
+    // The .splat asset is already packed binary; keep it uncompressed when bundled in APK.
     androidResources {
         noCompress.add("splat")
     }
@@ -46,4 +45,5 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.20.0")
 }
