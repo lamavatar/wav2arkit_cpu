@@ -20,6 +20,7 @@ class OnnxExpressionPipeline(
 
     val activeEp: String get() = onnx.activeEp
     val lastInferMs: Double get() = onnx.lastInferMs
+    val lastPostprocessMs: Double get() = onnx.lastPostprocessMs
 
     fun start() {
         if (!running.compareAndSet(false, true)) return

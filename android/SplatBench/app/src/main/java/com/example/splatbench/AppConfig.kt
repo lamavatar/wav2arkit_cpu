@@ -54,15 +54,36 @@ object AppConfig {
 
 
 
-    /** CPU worker threads for instance build. */
+    /** CPU worker threads for instance build (runtime-selectable from the UI). */
 
-    const val BUILD_THREADS = 1
+    @Volatile var BUILD_THREADS = 1
 
 
 
-    /** true = mouth-only (dynamic Gaussians over static base); false = full avatar. */
+    /** Upper bound for selectable build threads (device cores). */
 
-    const val MOUTH_ONLY = true
+    val MAX_BUILD_THREADS: Int = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+
+
+
+    /** Thread-count options offered in the UI spinner (clamped to device cores). */
+
+    val THREAD_OPTIONS: List<Int> = run {
+
+        val base = listOf(1, 2, 3, 4, 6, 8).filter { it <= MAX_BUILD_THREADS }
+
+        val opts = if (base.isEmpty()) listOf(1) else base
+
+        if (opts.contains(MAX_BUILD_THREADS)) opts else opts + MAX_BUILD_THREADS
+
+    }
+
+
+
+    /** true = mouth-only (dynamic Gaussians over static base); false = full avatar.
+        Runtime-toggleable from the UI. */
+
+    @Volatile var MOUTH_ONLY = true
 
 
 

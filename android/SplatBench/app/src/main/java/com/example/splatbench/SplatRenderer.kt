@@ -19,14 +19,25 @@ class SplatRenderer(
     private val playback: PlaybackController,
     private val frameCache: FrameCache,
     private val prefetchBuilder: InstanceBuilder,
+    private val perfStats: PerfStats? = null,
 ) : GLSurfaceView.Renderer {
 
     interface Callbacks {
-        fun onStats(line1: String, line2: String, line3: String)
+        /** Called once per drawn frame (GL thread) with the visible splat count. */
+        fun onStatsTick(splats: Int)
     }
 
-    private val mouthOnly = AppConfig.MOUTH_ONLY
-    private val buildThreads = AppConfig.BUILD_THREADS
+    @Volatile var mouthOnly = AppConfig.MOUTH_ONLY
+        private set
+
+    /** Switch mouth-only/full at runtime (call when not playing, then rebuild preview). */
+    fun setMouthOnly(enabled: Boolean) {
+        mouthOnly = enabled
+        lastGoodCached = null
+    }
+
+    private val buildThreads: Int
+        get() = AppConfig.BUILD_THREADS.coerceIn(1, AppConfig.MAX_BUILD_THREADS)
 
     private var splatProg = 0
     private var quadProg = 0
@@ -55,7 +66,7 @@ class SplatRenderer(
     private var staticCount = 0
     private var baseReady = false
 
-    private var liveExec: ExecutorService = Executors.newFixedThreadPool(buildThreads)
+    private var liveExec: ExecutorService = Executors.newFixedThreadPool(AppConfig.MAX_BUILD_THREADS)
     private val bgR = 0.063f; private val bgG = 0.063f; private val bgB = 0.078f
 
     @Volatile private var lastGoodCached: CachedFrame? = null
@@ -208,22 +219,23 @@ class SplatRenderer(
         if (cached == null) cached = lastGoodCached
         if (cached != null) lastGoodCached = cached
 
+        // Geometry phase: prepare/upload the per-frame instance buffer to the GPU.
+        val tGeom = System.nanoTime()
+        val instSize = if (cached != null) uploadInstance(cached) else 0
+        perfStats?.addGeom((System.nanoTime() - tGeom) / 1_000_000.0)
+
+        // Draw phase: rasterize to the screen (glFinish to capture GPU work).
+        val tDraw = System.nanoTime()
         if (cached != null) {
-            renderCachedToScreen(cached, mouthOnly)
+            drawScene(cached, mouthOnly, instSize)
         } else {
             renderClear(mouthOnly)
         }
+        GLES30.glFinish()
+        perfStats?.addDraw((System.nanoTime() - tDraw) / 1_000_000.0)
 
-        val mode = if (mouthOnly) "Mouth-only" else "Full"
         val splats = cached?.instanceCount ?: if (mouthOnly && baseReady) staticCount else defaultSplatCount()
-        val line1 = "$mode | threads=$buildThreads | splats=$splats"
-        val line2 = if (cached != null) {
-            String.format("build: %.2f ms", cached.buildMs)
-        } else {
-            "build: — ms"
-        }
-        val line3 = String.format("audio: %d ms", playback.audioPositionMs)
-        callbacks.onStats(line1, line2, line3)
+        callbacks.onStatsTick(splats)
     }
 
     private fun defaultSplatCount(): Int =
@@ -240,13 +252,8 @@ class SplatRenderer(
         }
     }
 
-    private fun renderCachedToScreen(cached: CachedFrame, mouthOnly: Boolean) {
-        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
-        GLES30.glViewport(0, 0, surfW, surfH)
-        GLES30.glClearColor(bgR, bgG, bgB, 1f)
-        GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
-        GLES30.glViewport(ox, oy, sq, sq)
-        if (mouthOnly) drawQuad(baseTex)
+    /** Upload the cached instance bytes into the GPU buffer; returns byte size. */
+    private fun uploadInstance(cached: CachedFrame): Int {
         val size = cached.instanceCount * 40
         if (size > 0) {
             uploadScratch.clear()
@@ -254,6 +261,18 @@ class SplatRenderer(
             uploadScratch.position(0)
             GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, instVbo)
             GLES30.glBufferData(GLES30.GL_ARRAY_BUFFER, size, uploadScratch, GLES30.GL_DYNAMIC_DRAW)
+        }
+        return size
+    }
+
+    private fun drawScene(cached: CachedFrame, mouthOnly: Boolean, instSize: Int) {
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+        GLES30.glViewport(0, 0, surfW, surfH)
+        GLES30.glClearColor(bgR, bgG, bgB, 1f)
+        GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
+        GLES30.glViewport(ox, oy, sq, sq)
+        if (mouthOnly) drawQuad(baseTex)
+        if (instSize > 0) {
             drawSplats(instVbo, cached.instanceCount)
         }
     }

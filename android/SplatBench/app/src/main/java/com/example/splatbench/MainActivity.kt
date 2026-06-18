@@ -13,6 +13,8 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.view.View
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -32,6 +34,8 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
     private val playback = PlaybackController()
     private val frameCache = FrameCache()
     private var prefetcher: FramePrefetcher? = null
+    private val perfStats = PerfStats()
+    private var lastStatUpdateMs = 0L
 
     private var mediaPlayer: MediaPlayer? = null
     private var audioUri: Uri? = null
@@ -118,7 +122,8 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         currentMode = AppConfig.effectiveAudioMode()
 
         binding.pickAudioButton.isEnabled = false
-        updateStatLines(splats = null, buildMs = null)
+        setupModeAndThreadControls()
+        refreshStats(splats = 0)
         updateControls()
 
         binding.pickAudioButton.setOnClickListener {
@@ -136,6 +141,45 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         }
 
         ensureStorageAccessAndLoad()
+    }
+
+    private fun setupModeAndThreadControls() {
+        binding.mouthOnlySwitch.isChecked = AppConfig.MOUTH_ONLY
+        binding.mouthOnlySwitch.setOnCheckedChangeListener { _, checked ->
+            if (checked == AppConfig.MOUTH_ONLY) return@setOnCheckedChangeListener
+            AppConfig.MOUTH_ONLY = checked
+            renderer?.setMouthOnly(checked)
+            perfStats.reset()
+            rebuildPreview()
+            refreshStats(splatCount(pack))
+        }
+
+        val options = AppConfig.THREAD_OPTIONS
+        val adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_item,
+            options.map { "$it" },
+        )
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        binding.threadSpinner.adapter = adapter
+        val sel = options.indexOf(AppConfig.BUILD_THREADS).coerceAtLeast(0)
+        binding.threadSpinner.setSelection(sel)
+        binding.threadSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                val n = options[position]
+                if (n == AppConfig.BUILD_THREADS) return
+                AppConfig.BUILD_THREADS = n
+                perfStats.reset()
+                if (playback.state != PlaybackState.PREBUFFERING &&
+                    playback.state != PlaybackState.PLAYING
+                ) {
+                    rebuildPreview()
+                }
+                refreshStats(splatCount(pack))
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
     }
 
     private fun hasAvatarTalkAccess(): Boolean {
@@ -203,13 +247,13 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
             pack = p,
             cache = frameCache,
             controller = playback,
-            buildThreads = AppConfig.BUILD_THREADS,
+            perfStats = perfStats,
         )
         prefetcher = pf
 
         val view = binding.glView
         view.setEGLContextClientVersion(3)
-        val r = SplatRenderer(p, this, playback, frameCache, pf.builder)
+        val r = SplatRenderer(p, this, playback, frameCache, pf.builder, perfStats)
         renderer = r
         view.setRenderer(r)
         view.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
@@ -218,7 +262,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
 
         binding.pickAudioButton.isEnabled = currentMode == AppConfig.AudioInputMode.FILE
         playback.state = PlaybackState.IDLE
-        updateStatLines(splats = splatCount(p), buildMs = null)
+        refreshStats(splats = splatCount(p))
         rebuildPreview()
         updateControls()
     }
@@ -272,6 +316,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         }
 
         val mouthOnly = AppConfig.MOUTH_ONLY
+        perfStats.reset()
         playback.prebufferSeconds = AppConfig.PREBUFFER_SECONDS
         playback.resetAudioPosition()
         playback.state = PlaybackState.PREBUFFERING
@@ -314,12 +359,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
     private val prebufferListener = object : FramePrefetcher.Listener {
         override fun onPrebufferProgress(built: Int, total: Int) {
             val last = frameCache.get(built - 1)
-            runOnUiThread {
-                updateStatLines(
-                    splats = last?.instanceCount ?: splatCount(pack),
-                    buildMs = last?.buildMs,
-                )
-            }
+            runOnUiThread { refreshStats(last?.instanceCount ?: splatCount(pack)) }
         }
 
         override fun onPrebufferComplete() {
@@ -403,7 +443,8 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         }
         frameCache.clear()
         expressionBuffer.clear()
-        updateStatLines(splats = splatCount(pack), buildMs = null)
+        perfStats.reset()
+        refreshStats(splats = splatCount(pack))
         updateControls()
         rebuildPreview()
     }
@@ -429,41 +470,43 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         }
         binding.playButton.isEnabled = busy || canStart
         binding.pickAudioButton.isEnabled = !busy && currentMode == AppConfig.AudioInputMode.FILE
+        binding.mouthOnlySwitch.isEnabled = !busy
+        binding.threadSpinner.isEnabled = !busy
     }
 
-    override fun onStats(line1: String, line2: String, line3: String) {
-        runOnUiThread {
-            binding.statLine1.text = line1
-            binding.statLine2.text = line2
-            if (playback.state != PlaybackState.PREBUFFERING) {
-                binding.statLine3.text = statLine3()
-            }
-        }
+    /** GL-thread tick: throttle UI text updates to ~5/s. */
+    override fun onStatsTick(splats: Int) {
+        val now = System.currentTimeMillis()
+        if (now - lastStatUpdateMs < 200) return
+        lastStatUpdateMs = now
+        runOnUiThread { refreshStats(splats) }
     }
 
-    private fun statLine3(): String {
+    private fun refreshStats(splats: Int) {
+        val mode = if (AppConfig.MOUTH_ONLY) "Mouth-only" else "Full"
+        binding.statLine1.text =
+            "$mode | threads=${AppConfig.BUILD_THREADS} | splats=$splats"
+        binding.statLine2.text = String.format(
+            "infer: %.1f ms | post: %.1f ms",
+            pipeline?.lastInferMs ?: 0.0,
+            pipeline?.lastPostprocessMs ?: 0.0,
+        )
+        binding.statLine3.text = String.format(
+            "build: %.2f | geom: %.2f | draw: %.2f ms (1s avg)",
+            perfStats.buildAvgMs, perfStats.geomAvgMs, perfStats.drawAvgMs,
+        )
+        binding.statLine4.text = statLine4()
+    }
+
+    private fun statLine4(): String {
         val src = currentMode.name
         val ep = onnx?.activeEp ?: "—"
         val expr = expressionBuffer.count
         val ringS = audioInput.ringSeconds()
-        val infer = pipeline?.lastInferMs ?: 0.0
         return String.format(
-            "src:%s ep:%s expr:%d ring:%.1fs infer:%.0fms",
-            src, ep, expr, ringS, infer,
+            "src:%s ep:%s expr:%d ring:%.1fs audio:%dms",
+            src, ep, expr, ringS, playback.audioPositionMs,
         )
-    }
-
-    private fun updateStatLines(splats: Int?, buildMs: Double?) {
-        val p = pack
-        val mode = if (AppConfig.MOUTH_ONLY) "Mouth-only" else "Full"
-        val splatStr = (splats ?: p?.let { splatCount(it) } ?: 0).toString()
-        binding.statLine1.text = "$mode | threads=${AppConfig.BUILD_THREADS} | splats=$splatStr"
-        binding.statLine2.text = if (buildMs != null) {
-            String.format("build: %.2f ms", buildMs)
-        } else {
-            "build: — ms"
-        }
-        binding.statLine3.text = statLine3()
     }
 
     private fun splatCount(p: AvatarPack?): Int {

@@ -60,6 +60,37 @@
                 android:text="Start" />
         </LinearLayout>
 
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <com.google.android.material.switchmaterial.SwitchMaterial
+                android:id="@+id/mouthOnlySwitch"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:checked="true"
+                android:textColor="#E0E0E0"
+                android:text="Mouth only" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="6dp"
+                android:textColor="#AAAAAA"
+                android:textSize="12sp"
+                android:text="Threads" />
+
+            <Spinner
+                android:id="@+id/threadSpinner"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:minWidth="72dp" />
+        </LinearLayout>
+
         <TextView
             android:id="@+id/statLine1"
             android:layout_width="match_parent"
@@ -86,6 +117,16 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="2dp"
             android:textColor="#E0E0E0"
+            android:textSize="12sp"
+            android:fontFamily="monospace"
+            android:text="" />
+
+        <TextView
+            android:id="@+id/statLine4"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:textColor="#9E9E9E"
             android:textSize="12sp"
             android:fontFamily="monospace"
             android:text="" />

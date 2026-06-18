@@ -16,9 +16,11 @@ class FramePrefetcher(
     private val pack: AvatarPack,
     private val cache: FrameCache,
     private val controller: PlaybackController,
-    buildThreads: Int,
+    private val perfStats: PerfStats? = null,
 ) {
-    private val threadCount = buildThreads.coerceIn(1, 64)
+    /** Live, runtime-selectable worker count (pool is sized to device cores). */
+    private val threadCount: Int
+        get() = AppConfig.BUILD_THREADS.coerceIn(1, AppConfig.MAX_BUILD_THREADS)
 
     interface Listener {
         fun onPrebufferProgress(built: Int, total: Int)
@@ -26,7 +28,7 @@ class FramePrefetcher(
         fun onError(message: String)
     }
 
-    private val exec: ExecutorService = Executors.newFixedThreadPool(threadCount)
+    private val exec: ExecutorService = Executors.newFixedThreadPool(AppConfig.MAX_BUILD_THREADS)
     val builder: InstanceBuilder = InstanceBuilder(pack)
     private val cancelled = AtomicBoolean(false)
     private val leadRunning = AtomicBoolean(false)
@@ -180,6 +182,7 @@ class FramePrefetcher(
         val t0 = System.nanoTime()
         val cached = builder.buildCached(frameIndex, weights, idx, exec, threadCount)
         val buildMs = (System.nanoTime() - t0) / 1_000_000.0
+        perfStats?.addBuild(buildMs)
         cache.put(cached.copy(buildMs = buildMs))
     }
 }

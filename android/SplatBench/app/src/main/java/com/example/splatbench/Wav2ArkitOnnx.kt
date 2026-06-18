@@ -34,7 +34,12 @@ class Wav2ArkitOnnx private constructor(
 ) {
     private val inputName: String = session.inputNames.iterator().next()
 
+    /** Most recent ORT forward (session.run) duration, ms. */
     @Volatile var lastInferMs: Double = 0.0
+        private set
+
+    /** Most recent LAM post-processing duration, ms. */
+    @Volatile var lastPostprocessMs: Double = 0.0
         private set
 
     /** Single forward pass on a float waveform. Returns [frames][52]. */
@@ -59,8 +64,6 @@ class Wav2ArkitOnnx private constructor(
         overlapBytes: Int = AppConfig.overlapBytes,
         maxContextFrames: Int = MAX_CONTEXT_FRAMES,
     ): Array<FloatArray> {
-        val t0 = System.nanoTime()
-
         // 1) overlap input in u8 (initial = silence-128 pad; else previous tail)
         val inputU8 = buildOverlapInput(pcmU8, ctx, overlapBytes)
         ctx.previousAudioU8 = inputU8.copyOf()
@@ -68,17 +71,20 @@ class Wav2ArkitOnnx private constructor(
         // 2) u8 → float32 [-1,1]
         val audioF = AudioPcmConverter.u8ToOnnxFloat(inputU8)
 
-        // 3) ORT forward
+        // 3) ORT forward (pure inference time)
+        val tInfer = System.nanoTime()
         val outExp = inferChunkFloat(audioF)
+        lastInferMs = (System.nanoTime() - tInfer) / 1_000_000.0
 
         // 4) slice new frames for this chunk's samples
         val newSlice = sliceNewFrames(outExp, pcmU8.size)
 
-        // 5) post-process with cross-chunk context
+        // 5) post-process with cross-chunk context (post-processing time)
+        val tPost = System.nanoTime()
         val result = postprocessChunk(newSlice, ctx, maxContextFrames)
+        lastPostprocessMs = (System.nanoTime() - tPost) / 1_000_000.0
 
         ctx.isInitial = false
-        lastInferMs = (System.nanoTime() - t0) / 1_000_000.0
         return result
     }
 
