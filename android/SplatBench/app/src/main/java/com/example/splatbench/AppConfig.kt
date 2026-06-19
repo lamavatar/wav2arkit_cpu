@@ -139,6 +139,10 @@ object AppConfig {
 
     fun allowsHeadBone(): Boolean = RENDER_MODE.allowsHeadBone()
 
+    /** Scissor crop around the mouth bbox (photo overlay or mouth-crop-only). */
+    fun usesMouthScissor(): Boolean =
+        PHOTO_COMPOSITE || RENDER_MODE == RenderMode.MOUTH_CROP_ONLY
+
 
 
     /** Geometry lead kept ahead of the audio clock during PLAYING (seconds). */

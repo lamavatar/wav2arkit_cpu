@@ -707,9 +707,18 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
     private fun statLine4(): String {
         val src = currentMode.name
         val ep = onnx?.activeEp ?: "—"
+        val crop = renderer?.mouthCropRatios
+        val cropStr = if (crop != null && crop.size >= 4) {
+            String.format(
+                " crop:%.2f,%.2f,%.2f,%.2f",
+                crop[0], crop[1], crop[2], crop[3],
+            )
+        } else {
+            ""
+        }
         return String.format(
-            "src:%s ep:%s audioPos:%dms",
-            src, ep, playback.audioPositionMs,
+            "src:%s ep:%s audioPos:%dms%s",
+            src, ep, playback.audioPositionMs, cropStr,
         )
     }
 

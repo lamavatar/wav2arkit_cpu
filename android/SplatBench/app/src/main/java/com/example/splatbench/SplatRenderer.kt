@@ -70,9 +70,7 @@ class SplatRenderer(
 
     fun setPhotoComposite(enabled: Boolean) {
         photoComposite = enabled
-        if (!enabled) {
-            mouthScissor = null
-        }
+        updateMouthScissor()
     }
 
     /** Upload [file] to [photoTex] on the GL thread. */
@@ -112,14 +110,22 @@ class SplatRenderer(
     }
 
     private fun updateMouthScissor() {
-        if (!photoComposite || !photoReady) {
-            mouthScissor = null
-            return
-        }
-        mouthScissor = MouthRegion.screenBBox(
+        mouthScissor = null
+        mouthCropRatios = null
+        if (!AppConfig.usesMouthScissor()) return
+        if (AppConfig.PHOTO_COMPOSITE && !photoReady) return
+        if (sq <= 0) return
+
+        val bbox = MouthRegion.screenBBox(
             pack, rot, tv, fy, sq * 0.5f, sq * 0.5f, sq.toFloat(), sq.toFloat(),
         )
+        mouthCropRatios = MouthRegion.toRatios(bbox, sq)
+        mouthScissor = MouthRegion.fromRatios(mouthCropRatios!!, sq)
     }
+
+    /** Mouth scissor as fractions of the square viewport `[x, y, w, h]` (top-left). */
+    @Volatile var mouthCropRatios: FloatArray? = null
+        private set
 
     private fun usePhotoBackground(): Boolean =
         photoComposite && photoReady
@@ -270,11 +276,7 @@ class SplatRenderer(
     /** Invalidate FBO base; call when render mode changes away from static-base composite. */
     fun onRenderModeChanged() {
         baseReady = false
-        if (!AppConfig.PHOTO_COMPOSITE) {
-            mouthScissor = null
-        } else {
-            updateMouthScissor()
-        }
+        updateMouthScissor()
     }
 
     fun invalidateStaticBase() {
@@ -420,7 +422,7 @@ class SplatRenderer(
             }
         }
         if (instSize > 0) {
-            val sc = if (usePhotoBackground()) mouthScissor else null
+            val sc = if (AppConfig.usesMouthScissor()) mouthScissor else null
             drawSplats(instVbo, cached.instanceCount, sc)
         }
     }

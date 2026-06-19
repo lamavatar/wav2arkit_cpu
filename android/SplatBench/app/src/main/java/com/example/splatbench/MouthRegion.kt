@@ -66,4 +66,31 @@ object MouthRegion {
         val h = max(2f, yMax - yMin).toInt()
         return intArrayOf(xMin.toInt(), yMin.toInt(), w, h)
     }
+
+    /**
+     * Normalized mouth bbox `[x, y, w, h]` in 0..1 relative to a square viewport
+     * (top-left origin), from a pixel [screenBBox] result.
+     */
+    fun toRatios(bbox: IntArray, viewportSize: Int): FloatArray {
+        val s = viewportSize.toFloat().coerceAtLeast(1f)
+        return floatArrayOf(
+            bbox[0] / s,
+            bbox[1] / s,
+            bbox[2] / s,
+            bbox[3] / s,
+        )
+    }
+
+    /** Pixel bbox (top-left) from normalized ratios and square viewport side [viewportSize]. */
+    fun fromRatios(rx: Float, ry: Float, rw: Float, rh: Float, viewportSize: Int): IntArray {
+        val s = viewportSize.coerceAtLeast(1)
+        val x = (rx * s).toInt().coerceIn(0, s - 1)
+        val y = (ry * s).toInt().coerceIn(0, s - 1)
+        val w = (rw * s).toInt().coerceIn(2, s - x)
+        val h = (rh * s).toInt().coerceIn(2, s - y)
+        return intArrayOf(x, y, w, h)
+    }
+
+    fun fromRatios(ratios: FloatArray, viewportSize: Int): IntArray =
+        fromRatios(ratios[0], ratios[1], ratios[2], ratios[3], viewportSize)
 }
