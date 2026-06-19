@@ -65,13 +65,15 @@ class FramePrefetcher(
                 val t0 = System.nanoTime()
                 val cached = builder.buildCached(0, weights, idx, exec, threadCount)
                 val buildMs = (System.nanoTime() - t0) / 1_000_000.0
-                perfStats?.addBuild(buildMs)
                 if (gen == previewGen.get()) {
+                    perfStats?.addBuild(buildMs)
                     cache.put(cached.copy(buildMs = buildMs))
                     listener?.onWarmupComplete()
                 }
             } catch (e: Exception) {
-                listener?.onError(e.message ?: "neutral preview build failed")
+                if (gen == previewGen.get()) {
+                    listener?.onError(e.message ?: "neutral preview build failed")
+                }
             }
         }
     }
@@ -216,7 +218,7 @@ class FramePrefetcher(
     private fun trimPlaybackCache(playbackFrame: Int, leadFrames: Int) {
         val minKeep = (playbackFrame - AppConfig.FRAME_CACHE_BEHIND).coerceAtLeast(0)
         val maxKeep = playbackFrame + leadFrames + AppConfig.FRAME_CACHE_AHEAD_MARGIN
-        cache.evictOutside(minKeep, maxKeep)
+        cache.evictOutside(minKeep, maxKeep, keepFrame = playbackFrame)
         cache.trimToMaxFrames(AppConfig.FRAME_CACHE_MAX_FRAMES)
     }
 }

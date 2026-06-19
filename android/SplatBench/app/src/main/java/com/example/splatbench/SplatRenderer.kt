@@ -50,6 +50,7 @@ class SplatRenderer(
     fun setRenderMode(mode: RenderMode) {
         renderMode = mode
         setPhotoComposite(AppConfig.PHOTO_COMPOSITE)
+        onRenderModeChanged()
     }
 
     @Volatile var headBoneEnabled = AppConfig.HEAD_BONE_ENABLED
@@ -119,9 +120,6 @@ class SplatRenderer(
             pack, rot, tv, fy, sq * 0.5f, sq * 0.5f, sq.toFloat(), sq.toFloat(),
         )
     }
-
-    private fun compositeMouthOnly(): Boolean =
-        AppConfig.useCompositeMouthOnly(pack)
 
     private fun usePhotoBackground(): Boolean =
         photoComposite && photoReady
@@ -269,6 +267,16 @@ class SplatRenderer(
         ensureBase()
     }
 
+    /** Invalidate FBO base; call when render mode changes away from static-base composite. */
+    fun onRenderModeChanged() {
+        baseReady = false
+        if (!AppConfig.PHOTO_COMPOSITE) {
+            mouthScissor = null
+        } else {
+            updateMouthScissor()
+        }
+    }
+
     fun invalidateStaticBase() {
         baseReady = false
     }
@@ -343,20 +351,24 @@ class SplatRenderer(
             state == PlaybackState.DONE -> frameCache.get(frameIdx) ?: frameCache.get(0)
             else -> frameCache.get(0)
         }
-        if (cached != null && AppConfig.needsStaticGaussianBase(pack)) ensureBase()
+
+        // No geometry for this frame → keep last framebuffer (do not clear to background).
+        if (cached == null) {
+            callbacks.onStatsTick(0)
+            if (fixedFpsEnabled && lipSyncActive) {
+                scheduleNextFrameFromStart(frameStartUptime)
+            }
+            return
+        }
+
+        if (AppConfig.needsStaticGaussianBase(pack)) ensureBase()
 
         val tGeom = System.nanoTime()
         val instSize = if (cached != null) uploadInstance(cached) else 0
         perfStats?.addGeom((System.nanoTime() - tGeom) / 1_000_000.0)
 
         val tDraw = System.nanoTime()
-        if (cached != null) {
-            drawScene(cached, instSize)
-        } else if (usePhotoBackground()) {
-            drawPhotoOnly()
-        } else {
-            renderBackgroundOnly()
-        }
+        drawScene(cached, instSize)
         GLES30.glFinish()
         perfStats?.addDraw((System.nanoTime() - tDraw) / 1_000_000.0)
 
@@ -382,13 +394,6 @@ class SplatRenderer(
         callbacks.scheduleNextFrame(nextFrameUptimeMs)
     }
 
-    private fun renderBackgroundOnly() {
-        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
-        GLES30.glViewport(0, 0, surfW, surfH)
-        GLES30.glClearColor(bgR, bgG, bgB, 1f)
-        GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
-    }
-
     private fun uploadInstance(cached: CachedFrame): Int {
         val size = cached.instanceCount * 40
         if (size > 0) {
@@ -401,15 +406,6 @@ class SplatRenderer(
         return size
     }
 
-    private fun drawPhotoOnly() {
-        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
-        GLES30.glViewport(0, 0, surfW, surfH)
-        GLES30.glClearColor(bgR, bgG, bgB, 1f)
-        GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
-        GLES30.glViewport(ox, oy, sq, sq)
-        drawPhotoQuad(photoTex)
-    }
-
     private fun drawScene(cached: CachedFrame, instSize: Int) {
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
         GLES30.glViewport(0, 0, surfW, surfH)
@@ -418,7 +414,7 @@ class SplatRenderer(
         GLES30.glViewport(ox, oy, sq, sq)
         when {
             usePhotoBackground() -> drawPhotoQuad(photoTex)
-            compositeMouthOnly() -> {
+            AppConfig.needsStaticGaussianBase(pack) -> {
                 ensureBase()
                 drawQuad(baseTex)
             }

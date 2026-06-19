@@ -185,7 +185,6 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
     }
 
     private var renderModeSpinnerBusy = false
-    private var previewRebuildPending = false
 
     private fun setupRenderModeSpinner() {
         val modes = RenderMode.entries
@@ -382,8 +381,6 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
             }
             return
         }
-        if (previewRebuildPending) return
-        previewRebuildPending = true
         rebuildPreview()
     }
 
@@ -397,13 +394,11 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
     private fun rebuildPreview() {
         val pf = prefetcher ?: return
         val mouthOnly = AppConfig.useMouthOnlyIndices(pack ?: return)
-        previewRebuildPending = true
         pf.cancel()
         frameCache.clear()
         pf.resetCancel()
         glView?.queueEvent {
             renderer?.syncPrefetchView()
-            if (AppConfig.needsStaticGaussianBase(pack ?: return@queueEvent)) renderer?.ensureStaticBase()
             runOnUiThread {
                 pf.buildNeutralPreview(mouthOnly, previewListener)
             }
@@ -416,19 +411,19 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
 
     private val previewListener = object : FramePrefetcher.Listener {
         override fun onWarmupComplete() {
-            previewRebuildPending = false
             runOnUiThread {
                 val cached = frameCache.get(0)
                 lastSplats = cached?.instanceCount ?: splatCount(pack)
                 glView?.queueEvent {
-                    if (AppConfig.needsStaticGaussianBase(pack ?: return@queueEvent)) renderer?.ensureStaticBase()
+                    if (AppConfig.needsStaticGaussianBase(pack ?: return@queueEvent)) {
+                        renderer?.ensureStaticBase()
+                    }
                     runOnUiThread { glView?.requestRender() }
                 }
             }
         }
 
         override fun onError(message: String) {
-            previewRebuildPending = false
             runOnUiThread { Toast.makeText(this@MainActivity, message, Toast.LENGTH_SHORT).show() }
         }
     }
@@ -480,7 +475,6 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
 
         glView?.queueEvent {
             renderer?.syncPrefetchView()
-            if (AppConfig.needsStaticGaussianBase(pk)) renderer?.ensureStaticBase()
             runOnUiThread {
                 pf.startSession(mouthOnly, sessionListener)
             }
@@ -507,7 +501,12 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         }
 
         override fun onWarmupComplete() {
-            runOnUiThread { beginAudioAndPlayback() }
+            glView?.queueEvent {
+                if (AppConfig.needsStaticGaussianBase(pack ?: return@queueEvent)) {
+                    renderer?.ensureStaticBase()
+                }
+                runOnUiThread { beginAudioAndPlayback() }
+            }
         }
 
         override fun onError(message: String) {

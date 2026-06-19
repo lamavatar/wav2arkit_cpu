@@ -24,10 +24,11 @@ class FrameCache {
 
     fun size(): Int = map.size
 
-    /** Drop cached frames outside [minInclusive, maxInclusive]. */
-    fun evictOutside(minInclusive: Int, maxInclusive: Int) {
+    /** Drop cached frames outside [minInclusive, maxInclusive] (never evicts [keepFrame]). */
+    fun evictOutside(minInclusive: Int, maxInclusive: Int, keepFrame: Int = -1) {
         if (minInclusive > maxInclusive) return
         for (key in map.keys) {
+            if (key == keepFrame) continue
             if (key < minInclusive || key > maxInclusive) {
                 map.remove(key)
             }
