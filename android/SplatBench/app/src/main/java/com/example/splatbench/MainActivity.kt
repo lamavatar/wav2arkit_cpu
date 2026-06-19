@@ -245,8 +245,29 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         binding.pickAudioButton.isEnabled = currentMode == AppConfig.AudioInputMode.FILE
         playback.state = PlaybackState.IDLE
         refreshStats(splats = splatCount(p))
-        if (renderer?.surfaceReady == true) rebuildPreview()
+        maybeRebuildIdlePreview()
         updateControls()
+    }
+
+    /**
+     * Build/show the neutral (weight=0) preview when avatar + GL surface are both
+     * ready. Safe to call from setupGl, onSurfaceReady, or onResume — whichever
+     * runs last will succeed (fixes first-launch race).
+     */
+    private fun maybeRebuildIdlePreview() {
+        if (prefetcher == null || pack == null) return
+        if (renderer?.surfaceReady != true) return
+        val state = playback.state
+        if (state != PlaybackState.IDLE && state != PlaybackState.READY) return
+
+        if (frameCache.has(0)) {
+            glView?.queueEvent {
+                if (AppConfig.MOUTH_ONLY) renderer?.ensureStaticBase()
+                runOnUiThread { glView?.requestRender() }
+            }
+            return
+        }
+        rebuildPreview()
     }
 
     private fun togglePlayback() {
@@ -272,12 +293,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
     }
 
     override fun onSurfaceReady() {
-        runOnUiThread {
-            val state = playback.state
-            if (state == PlaybackState.IDLE || state == PlaybackState.READY) {
-                rebuildPreview()
-            }
-        }
+        runOnUiThread { maybeRebuildIdlePreview() }
     }
 
     private val previewListener = object : FramePrefetcher.Listener {
@@ -285,7 +301,10 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
             runOnUiThread {
                 val cached = frameCache.get(0)
                 refreshStats(cached?.instanceCount ?: splatCount(pack))
-                glView?.requestRender()
+                glView?.queueEvent {
+                    if (AppConfig.MOUTH_ONLY) renderer?.ensureStaticBase()
+                    runOnUiThread { glView?.requestRender() }
+                }
             }
         }
 
@@ -559,7 +578,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
                 renderer?.startFixedFps()
                 glView?.requestRender()
             }
-            PlaybackState.IDLE, PlaybackState.READY -> rebuildPreview()
+            PlaybackState.IDLE, PlaybackState.READY -> maybeRebuildIdlePreview()
             else -> {}
         }
     }
