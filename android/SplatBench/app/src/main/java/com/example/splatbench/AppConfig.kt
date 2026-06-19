@@ -145,6 +145,9 @@ object AppConfig {
     /** Render full frame to FBO, then blit only the mouth bbox to the screen. */
     fun usesFramebufferCrop(): Boolean = RENDER_MODE == RenderMode.MOUTH_CROP_ONLY
 
+    /** Manual crop rect applies in photo composite or framebuffer crop mode. */
+    fun usesManualMouthCrop(): Boolean = PHOTO_COMPOSITE || usesFramebufferCrop()
+
 
 
     /** Geometry lead kept ahead of the audio clock during PLAYING (seconds). */

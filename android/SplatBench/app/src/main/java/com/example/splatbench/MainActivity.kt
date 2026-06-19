@@ -16,6 +16,7 @@ import android.provider.Settings
 import android.view.View
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
+import android.widget.SeekBar
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -116,6 +117,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
 
         binding.pickAudioButton.isEnabled = false
         setupModeAndThreadControls()
+        setupCropControls()
         updateControls()
 
         binding.pickAudioButton.setOnClickListener {
@@ -184,6 +186,61 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         }
     }
 
+    private var cropSeekBusy = false
+
+    private fun setupCropControls() {
+        binding.cropGuideSwitch.isChecked = MouthCropConfig.GUIDE_ENABLED
+        binding.cropGuideSwitch.setOnCheckedChangeListener { _, checked ->
+            MouthCropConfig.GUIDE_ENABLED = checked
+            syncCropUi()
+            glView?.requestRender()
+        }
+
+        syncCropSeekbarsFromConfig()
+
+        val seekListener = object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                if (cropSeekBusy || !fromUser) return
+                val v = progress / 1000f
+                when (seekBar?.id) {
+                    binding.cropSeekX.id -> MouthCropConfig.X = v
+                    binding.cropSeekY.id -> MouthCropConfig.Y = v
+                    binding.cropSeekW.id -> MouthCropConfig.W = v
+                    binding.cropSeekH.id -> MouthCropConfig.H = v
+                }
+                MouthCropConfig.clampInBounds()
+                syncCropSeekbarsFromConfig()
+                syncCropUi()
+                glView?.requestRender()
+            }
+
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        }
+        binding.cropSeekX.setOnSeekBarChangeListener(seekListener)
+        binding.cropSeekY.setOnSeekBarChangeListener(seekListener)
+        binding.cropSeekW.setOnSeekBarChangeListener(seekListener)
+        binding.cropSeekH.setOnSeekBarChangeListener(seekListener)
+        syncCropUi()
+    }
+
+    private fun syncCropSeekbarsFromConfig() {
+        cropSeekBusy = true
+        binding.cropSeekX.progress = (MouthCropConfig.X * 1000).toInt().coerceIn(0, 1000)
+        binding.cropSeekY.progress = (MouthCropConfig.Y * 1000).toInt().coerceIn(0, 1000)
+        binding.cropSeekW.progress = (MouthCropConfig.W * 1000).toInt().coerceIn(0, 1000)
+        binding.cropSeekH.progress = (MouthCropConfig.H * 1000).toInt().coerceIn(0, 1000)
+        cropSeekBusy = false
+    }
+
+    private fun syncCropUi() {
+        val show = AppConfig.usesManualMouthCrop()
+        binding.cropPanel.visibility = if (show) View.VISIBLE else View.GONE
+        binding.cropGuideOverlay.guideEnabled = show && MouthCropConfig.GUIDE_ENABLED
+        binding.cropValueLabel.text = MouthCropConfig.formatRatios()
+        binding.cropGuideOverlay.syncFromConfig()
+    }
+
     private var renderModeSpinnerBusy = false
 
     private fun setupRenderModeSpinner() {
@@ -234,6 +291,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         }
         renderer?.setRenderMode(mode)
         updateHeadBoneSwitchState(pack)
+        syncCropUi()
         glView?.queueEvent {
             if (AppConfig.PHOTO_COMPOSITE) renderer?.reloadPhotoTexture()
                 runOnUiThread {
@@ -325,6 +383,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         view.setRenderer(r)
         view.renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
         glView = view
+        syncCropUi()
         view.queueEvent {
             if (AppConfig.PHOTO_COMPOSITE) r.reloadPhotoTexture()
         }
@@ -707,12 +766,8 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
     private fun statLine4(): String {
         val src = currentMode.name
         val ep = onnx?.activeEp ?: "—"
-        val crop = renderer?.mouthCropRatios
-        val cropStr = if (crop != null && crop.size >= 4) {
-            String.format(
-                " crop:%.2f,%.2f,%.2f,%.2f",
-                crop[0], crop[1], crop[2], crop[3],
-            )
+        val cropStr = if (AppConfig.usesManualMouthCrop()) {
+            " ${MouthCropConfig.formatRatios()}"
         } else {
             ""
         }

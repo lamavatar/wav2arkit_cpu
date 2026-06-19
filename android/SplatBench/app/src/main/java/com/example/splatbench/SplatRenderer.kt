@@ -70,7 +70,6 @@ class SplatRenderer(
 
     fun setPhotoComposite(enabled: Boolean) {
         photoComposite = enabled
-        updateMouthScissor()
     }
 
     /** Upload [file] to [photoTex] on the GL thread. */
@@ -91,7 +90,6 @@ class SplatRenderer(
         GLUtils.texImage2D(GLES30.GL_TEXTURE_2D, 0, square, 0)
         square.recycle()
         photoReady = true
-        updateMouthScissor()
     }
 
     fun reloadPhotoTexture() {
@@ -109,23 +107,10 @@ class SplatRenderer(
         return Bitmap.createBitmap(src, x, y, side, side)
     }
 
-    private fun updateMouthScissor() {
-        mouthScissor = null
-        mouthCropRatios = null
-        if (!AppConfig.PHOTO_COMPOSITE && !AppConfig.usesFramebufferCrop()) return
-        if (AppConfig.PHOTO_COMPOSITE && !photoReady) return
-        if (sq <= 0) return
-
-        val bbox = MouthRegion.screenBBox(
-            pack, rot, tv, fy, sq * 0.5f, sq * 0.5f, sq.toFloat(), sq.toFloat(),
-        )
-        mouthCropRatios = MouthRegion.toRatios(bbox, sq)
-        mouthScissor = MouthRegion.fromRatios(mouthCropRatios!!, sq)
+    private fun manualCropPixels(): IntArray? {
+        if (!AppConfig.usesManualMouthCrop() || sq <= 0) return null
+        return MouthCropConfig.toPixels(sq)
     }
-
-    /** Mouth scissor as fractions of the square viewport `[x, y, w, h]` (top-left). */
-    @Volatile var mouthCropRatios: FloatArray? = null
-        private set
 
     private fun usePhotoBackground(): Boolean =
         photoComposite && photoReady
@@ -155,7 +140,6 @@ class SplatRenderer(
     private var sceneTex = 0
     private var photoTex = 0
     private var photoReady = false
-    private var mouthScissor: IntArray? = null
     private var uViewport = 0
     private var uTex = 0
     private var uPhotoTex = 0
@@ -230,7 +214,6 @@ class SplatRenderer(
         setupSceneFbo()
         baseReady = false
         if (photoComposite) reloadPhotoTexture()
-        updateMouthScissor()
         surfaceReady = true
         callbacks.onSurfaceReady()
     }
@@ -279,7 +262,6 @@ class SplatRenderer(
     /** Invalidate FBO base; call when render mode changes away from static-base composite. */
     fun onRenderModeChanged() {
         baseReady = false
-        updateMouthScissor()
     }
 
     fun invalidateStaticBase() {
@@ -449,18 +431,21 @@ class SplatRenderer(
             }
         }
         if (instSize > 0) {
-            val sc = if (AppConfig.usesMouthScissor()) mouthScissor else null
+            val sc = if (AppConfig.usesMouthScissor() && !MouthCropConfig.GUIDE_ENABLED) {
+                manualCropPixels()
+            } else {
+                null
+            }
             drawSplats(instVbo, cached.instanceCount, sc)
         }
     }
 
     /**
-     * Crop-only mode: render the complete avatar into [sceneFbo], then blit the mouth
-     * bbox from that finished frame (no glScissor during splat draw — avoids black holes).
+     * Crop-only mode: render the complete avatar into [sceneFbo], then blit the manual
+     * crop rect at its original position and size (1:1, not zoomed).
      */
     private fun drawSceneFramebufferCrop(cached: CachedFrame, instSize: Int) {
-        updateMouthScissor()
-        val crop = mouthScissor
+        val crop = manualCropPixels()
 
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, sceneFbo)
         GLES30.glViewport(0, 0, sq, sq)
@@ -475,6 +460,10 @@ class SplatRenderer(
         GLES30.glClearColor(bgR, bgG, bgB, 1f)
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
 
+        if (MouthCropConfig.GUIDE_ENABLED) {
+            blitSceneRect(0, 0, sq, sq, ox, oy, sq, sq)
+            return
+        }
         if (crop == null) return
 
         val sx = crop[0]
@@ -482,12 +471,32 @@ class SplatRenderer(
         val sw = crop[2]
         val sh = crop[3]
         val srcY = sq - syTop - sh
+        val dx = ox + sx
+        val dyTop = oy + syTop
+        val destY = surfH - dyTop - sh
 
         GLES30.glBindFramebuffer(GLES30.GL_READ_FRAMEBUFFER, sceneFbo)
         GLES30.glBindFramebuffer(GLES30.GL_DRAW_FRAMEBUFFER, 0)
         GLES30.glBlitFramebuffer(
             sx, srcY, sx + sw, srcY + sh,
-            ox, oy, ox + sq, oy + sq,
+            dx, destY, dx + sw, destY + sh,
+            GLES30.GL_COLOR_BUFFER_BIT, GLES30.GL_NEAREST,
+        )
+        GLES30.glBindFramebuffer(GLES30.GL_READ_FRAMEBUFFER, 0)
+        GLES30.glBindFramebuffer(GLES30.GL_DRAW_FRAMEBUFFER, 0)
+    }
+
+    private fun blitSceneRect(
+        srcX: Int, srcY: Int, srcW: Int, srcH: Int,
+        destX: Int, destYTop: Int, destW: Int, destH: Int,
+    ) {
+        val srcYGl = sq - srcY - srcH
+        val destYGl = surfH - destYTop - destH
+        GLES30.glBindFramebuffer(GLES30.GL_READ_FRAMEBUFFER, sceneFbo)
+        GLES30.glBindFramebuffer(GLES30.GL_DRAW_FRAMEBUFFER, 0)
+        GLES30.glBlitFramebuffer(
+            srcX, srcYGl, srcX + srcW, srcYGl + srcH,
+            destX, destYGl, destX + destW, destYGl + destH,
             GLES30.GL_COLOR_BUFFER_BIT, GLES30.GL_LINEAR,
         )
         GLES30.glBindFramebuffer(GLES30.GL_READ_FRAMEBUFFER, 0)
