@@ -377,24 +377,20 @@ class SplatRenderer(
             state == PlaybackState.DONE -> frameCache.get(frameIdx) ?: frameCache.get(0)
             else -> frameCache.get(0)
         }
-
-        // No geometry for this frame → keep last framebuffer (do not clear to background).
-        if (cached == null) {
-            callbacks.onStatsTick(0)
-            if (fixedFpsEnabled && lipSyncActive) {
-                scheduleNextFrameFromStart(frameStartUptime)
-            }
-            return
-        }
-
-        if (AppConfig.needsStaticGaussianBase(pack)) ensureBase()
+        if (cached != null && AppConfig.needsStaticGaussianBase(pack)) ensureBase()
 
         val tGeom = System.nanoTime()
         val instSize = if (cached != null) uploadInstance(cached) else 0
         perfStats?.addGeom((System.nanoTime() - tGeom) / 1_000_000.0)
 
         val tDraw = System.nanoTime()
-        drawScene(cached, instSize)
+        if (cached != null) {
+            drawScene(cached, instSize)
+        } else if (usePhotoBackground()) {
+            drawPhotoOnly()
+        } else {
+            renderBackgroundOnly()
+        }
         GLES30.glFinish()
         perfStats?.addDraw((System.nanoTime() - tDraw) / 1_000_000.0)
 
@@ -418,6 +414,22 @@ class SplatRenderer(
             nextFrameUptimeMs = now
         }
         callbacks.scheduleNextFrame(nextFrameUptimeMs)
+    }
+
+    private fun renderBackgroundOnly() {
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+        GLES30.glViewport(0, 0, surfW, surfH)
+        GLES30.glClearColor(bgR, bgG, bgB, 1f)
+        GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
+    }
+
+    private fun drawPhotoOnly() {
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+        GLES30.glViewport(0, 0, surfW, surfH)
+        GLES30.glClearColor(bgR, bgG, bgB, 1f)
+        GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
+        GLES30.glViewport(ox, oy, sq, sq)
+        drawPhotoQuad(photoTex)
     }
 
     private fun uploadInstance(cached: CachedFrame): Int {
