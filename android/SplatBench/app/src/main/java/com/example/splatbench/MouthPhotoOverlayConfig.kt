@@ -7,16 +7,16 @@ package com.example.splatbench
 object MouthPhotoOverlayConfig {
 
   /** Horizontal shift as fraction of viewport width (-0.5 .. 0.5). */
-  @Volatile var OFFSET_X = 0f
+  @Volatile var OFFSET_X = 0.011f
 
   /** Vertical shift as fraction of viewport height (-0.5 .. 0.5). */
-  @Volatile var OFFSET_Y = 0f
+  @Volatile var OFFSET_Y = -0.036f
 
   /** Uniform scale around [PIVOT_X]/[PIVOT_Y] (0.25 .. 3.0). */
-  @Volatile var SCALE = 1f
+  @Volatile var SCALE = 1.266f
 
   /** Scale pivot X (0 = left, 1 = right). */
-  @Volatile var PIVOT_X = 0.5f
+  @Volatile var PIVOT_X = 0.513f
 
   /** Scale pivot Y (0 = top, 1 = bottom). */
   @Volatile var PIVOT_Y = 0.58f
