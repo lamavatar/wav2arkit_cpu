@@ -99,6 +99,22 @@
             android:orientation="horizontal">
 
             <com.google.android.material.switchmaterial.SwitchMaterial
+                android:id="@+id/photoCompositeSwitch"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:checked="false"
+                android:textColor="#E0E0E0"
+                android:text="Photo composite" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <com.google.android.material.switchmaterial.SwitchMaterial
                 android:id="@+id/headBoneSwitch"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"

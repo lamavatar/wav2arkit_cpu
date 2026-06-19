@@ -22,7 +22,8 @@ object AppConfig {
 
     const val SPLAT_FILE_NAME = "third.splat"
 
-
+    /** Neutral face photo for photo-composite mode (same folder as splat). */
+    const val PHOTO_FILE_NAME = "third.png"
 
     /** ONNX filename inside [avatarTalkDir]. */
 
@@ -38,7 +39,7 @@ object AppConfig {
 
     fun splatFile(): File = File(avatarTalkDir(), SPLAT_FILE_NAME)
 
-
+    fun photoFile(): File = File(avatarTalkDir(), PHOTO_FILE_NAME)
 
     fun onnxFile(): File = File(avatarTalkDir(), ONNX_FILE_NAME)
 
@@ -48,7 +49,7 @@ object AppConfig {
 
     fun splatPathHint(): String = "/sdcard/$AVATAR_TALK_DIR_NAME/$SPLAT_FILE_NAME"
 
-
+    fun photoPathHint(): String = "/sdcard/$AVATAR_TALK_DIR_NAME/$PHOTO_FILE_NAME"
 
     fun onnxPathHint(): String = "/sdcard/$AVATAR_TALK_DIR_NAME/$ONNX_FILE_NAME"
 
@@ -86,10 +87,21 @@ object AppConfig {
     @Volatile var MOUTH_ONLY = true
 
     /** Apply baked head-bone matrices from the SPL2 HEAD trailer (runtime toggle). */
-    @Volatile var HEAD_BONE_ENABLED = false
+  @Volatile var HEAD_BONE_ENABLED = false
+
+    /** Overlay dynamic mouth splats on [PHOTO_FILE_NAME] instead of a 3D static base. */
+    @Volatile var PHOTO_COMPOSITE = false
 
     fun useCompositeMouthOnly(pack: AvatarPack): Boolean =
         MOUTH_ONLY && !(HEAD_BONE_ENABLED && pack.hasHeadAnimation)
+
+    /** Build/render only the dynamic (mouth) Gaussian subset. */
+    fun useMouthOnlyIndices(pack: AvatarPack): Boolean =
+        PHOTO_COMPOSITE || useCompositeMouthOnly(pack)
+
+    /** Pre-render static Gaussians into the base FBO (not used in photo composite). */
+    fun needsStaticGaussianBase(pack: AvatarPack): Boolean =
+        useCompositeMouthOnly(pack) && !PHOTO_COMPOSITE
 
 
 

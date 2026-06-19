@@ -142,11 +142,45 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
                 Toast.makeText(this, "No head animation in .splat (re-bake with animation.glb)", Toast.LENGTH_LONG).show()
                 return@setOnCheckedChangeListener
             }
+            if (checked && AppConfig.PHOTO_COMPOSITE) {
+                binding.headBoneSwitch.isChecked = false
+                Toast.makeText(this, "Head bone is disabled in photo composite mode", Toast.LENGTH_SHORT).show()
+                return@setOnCheckedChangeListener
+            }
             AppConfig.HEAD_BONE_ENABLED = checked
             syncHeadBoneToBuilders()
             perfStats.reset()
             rebuildPreview()
             refreshStats(splatCount(pack))
+        }
+
+        binding.photoCompositeSwitch.isChecked = AppConfig.PHOTO_COMPOSITE
+        binding.photoCompositeSwitch.setOnCheckedChangeListener { _, checked ->
+            if (checked == AppConfig.PHOTO_COMPOSITE) return@setOnCheckedChangeListener
+            if (checked && !AppConfig.photoFile().isFile) {
+                binding.photoCompositeSwitch.isChecked = false
+                Toast.makeText(
+                    this,
+                    "Photo not found: ${AppConfig.photoPathHint()}",
+                    Toast.LENGTH_LONG,
+                ).show()
+                return@setOnCheckedChangeListener
+            }
+            AppConfig.PHOTO_COMPOSITE = checked
+            if (checked) {
+                AppConfig.HEAD_BONE_ENABLED = false
+                binding.headBoneSwitch.isChecked = false
+                syncHeadBoneToBuilders()
+            }
+            renderer?.setPhotoComposite(checked)
+            glView?.queueEvent {
+                if (checked) renderer?.reloadPhotoTexture()
+                runOnUiThread {
+                    perfStats.reset()
+                    rebuildPreview()
+                    refreshStats(splatCount(pack))
+                }
+            }
         }
 
         val options = AppConfig.THREAD_OPTIONS
@@ -208,7 +242,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
     private fun showStorageAccessHint() {
         Toast.makeText(
             this,
-            "Allow file access, then copy model & splat to ${AppConfig.avatarTalkDir()}",
+            "Allow file access, then copy model, splat & photo to ${AppConfig.avatarTalkDir()}",
             Toast.LENGTH_LONG,
         ).show()
     }
@@ -249,15 +283,19 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         prefetcher = pf
         syncHeadBoneToBuilders()
         updateHeadBoneSwitchState(p)
+        updatePhotoCompositeSwitchState()
 
         val view = binding.glView
         view.setEGLContextClientVersion(3)
         val r = SplatRenderer(p, this, playback, frameCache, pf.builder, perfStats)
         renderer = r
-        syncHeadBoneToBuilders()
+        r.setPhotoComposite(AppConfig.PHOTO_COMPOSITE)
         view.setRenderer(r)
         view.renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
         glView = view
+        view.queueEvent {
+            if (AppConfig.PHOTO_COMPOSITE) r.reloadPhotoTexture()
+        }
         view.onResume()
 
         binding.pickAudioButton.isEnabled = currentMode == AppConfig.AudioInputMode.FILE
@@ -280,12 +318,22 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
             binding.headBoneSwitch.isChecked = false
         }
         val busy = playback.state == PlaybackState.WARMING_UP || playback.state == PlaybackState.PLAYING
-        binding.headBoneSwitch.isEnabled = has && !busy
-        binding.headBoneSwitch.alpha = if (has) 1f else 0.45f
+        binding.headBoneSwitch.isEnabled = has && !busy && !AppConfig.PHOTO_COMPOSITE
+        binding.headBoneSwitch.alpha = if (has && !AppConfig.PHOTO_COMPOSITE) 1f else 0.45f
+    }
+
+    private fun updatePhotoCompositeSwitchState() {
+        val has = AppConfig.photoFile().isFile
+        if (!has) {
+            AppConfig.PHOTO_COMPOSITE = false
+            binding.photoCompositeSwitch.isChecked = false
+        }
+        val busy = playback.state == PlaybackState.WARMING_UP || playback.state == PlaybackState.PLAYING
+        binding.photoCompositeSwitch.isEnabled = has && !busy
+        binding.photoCompositeSwitch.alpha = if (has) 1f else 0.45f
     }
 
     /**
-     * Build/show the neutral (weight=0) preview when avatar + GL surface are both
      * ready. Safe to call from setupGl, onSurfaceReady, or onResume — whichever
      * runs last will succeed (fixes first-launch race).
      */
@@ -297,7 +345,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
 
         if (frameCache.has(0)) {
             glView?.queueEvent {
-                if (AppConfig.useCompositeMouthOnly(pack ?: return@queueEvent)) renderer?.ensureStaticBase()
+                if (AppConfig.needsStaticGaussianBase(pack ?: return@queueEvent)) renderer?.ensureStaticBase()
                 runOnUiThread { glView?.requestRender() }
             }
             return
@@ -314,13 +362,13 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
 
     private fun rebuildPreview() {
         val pf = prefetcher ?: return
-        val mouthOnly = AppConfig.useCompositeMouthOnly(pack ?: return)
+        val mouthOnly = AppConfig.useMouthOnlyIndices(pack ?: return)
         pf.cancel()
         frameCache.clear()
         pf.resetCancel()
         glView?.queueEvent {
             renderer?.syncPrefetchView()
-            if (mouthOnly) renderer?.ensureStaticBase()
+            if (AppConfig.needsStaticGaussianBase(pack ?: return@queueEvent)) renderer?.ensureStaticBase()
             runOnUiThread {
                 pf.buildNeutralPreview(mouthOnly, previewListener)
             }
@@ -337,7 +385,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
                 val cached = frameCache.get(0)
                 refreshStats(cached?.instanceCount ?: splatCount(pack))
                 glView?.queueEvent {
-                    if (AppConfig.useCompositeMouthOnly(pack ?: return@queueEvent)) renderer?.ensureStaticBase()
+                    if (AppConfig.needsStaticGaussianBase(pack ?: return@queueEvent)) renderer?.ensureStaticBase()
                     runOnUiThread { glView?.requestRender() }
                 }
             }
@@ -365,7 +413,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
             return
         }
 
-        val mouthOnly = AppConfig.useCompositeMouthOnly(pk)
+        val mouthOnly = AppConfig.useMouthOnlyIndices(pk)
         perfStats.reset()
         session.reset()
         playback.prebufferSeconds = AppConfig.PREBUFFER_SECONDS
@@ -393,7 +441,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
 
         glView?.queueEvent {
             renderer?.syncPrefetchView()
-            if (mouthOnly) renderer?.ensureStaticBase()
+            if (AppConfig.needsStaticGaussianBase(pk)) renderer?.ensureStaticBase()
             runOnUiThread {
                 pf.startSession(mouthOnly, sessionListener)
             }
@@ -559,9 +607,10 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         }
         binding.playButton.isEnabled = busy || canStart
         binding.pickAudioButton.isEnabled = !busy && currentMode == AppConfig.AudioInputMode.FILE
-        binding.mouthOnlySwitch.isEnabled = !busy
-        binding.headBoneSwitch.isEnabled = !busy && pack?.hasHeadAnimation == true
-        binding.headBoneSwitch.alpha = if (pack?.hasHeadAnimation == true) 1f else 0.45f
+        binding.mouthOnlySwitch.isEnabled = !busy && !AppConfig.PHOTO_COMPOSITE
+        binding.photoCompositeSwitch.isEnabled = !busy && AppConfig.photoFile().isFile
+        binding.photoCompositeSwitch.alpha = if (AppConfig.photoFile().isFile) 1f else 0.45f
+        binding.headBoneSwitch.isEnabled = !busy && pack?.hasHeadAnimation == true && !AppConfig.PHOTO_COMPOSITE
         binding.threadSpinner.isEnabled = !busy
     }
 
@@ -575,6 +624,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
     private fun refreshStats(splats: Int) {
         val p = pack
         val mode = when {
+            AppConfig.PHOTO_COMPOSITE -> "Photo+mouth"
             AppConfig.HEAD_BONE_ENABLED && p?.hasHeadAnimation == true -> "Head+${if (AppConfig.MOUTH_ONLY) "Mouth" else "Full"}"
             AppConfig.MOUTH_ONLY -> "Mouth-only"
             else -> "Full"
@@ -609,7 +659,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
 
     private fun splatCount(p: AvatarPack?): Int {
         if (p == null) return 0
-        return if (AppConfig.useCompositeMouthOnly(p)) p.dynamicIndices.size else p.numGaussians
+        return if (AppConfig.useMouthOnlyIndices(p)) p.dynamicIndices.size else p.numGaussians
     }
 
     override fun onResume() {
