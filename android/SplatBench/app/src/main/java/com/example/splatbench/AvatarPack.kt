@@ -177,6 +177,7 @@ class AvatarPack private constructor(
             val name = String(nameBytes, Charsets.US_ASCII)
             val matrices = readFloats(bb, h * 16)
             return HeadTrailer(name, clipDur, matrices)
+        }
 
         private fun readFloats(bb: ByteBuffer, count: Int): FloatArray {
             val out = FloatArray(count)

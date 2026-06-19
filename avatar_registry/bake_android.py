@@ -75,6 +75,22 @@ MAGIC_SPL1 = b"SPL1"
 MAGIC_SPL2 = b"SPL2"
 MAGIC_HEAD = b"HEAD"
 DEFAULT_FPS = 30.0
+ARKIT_SUBDIR = "arkitWithBSData"
+
+
+def resolve_avatar_dir(avatar_dir: str | Path) -> Path:
+    """Return the directory that actually contains ``offset.ply`` / ``skin.glb``.
+
+    LAM packs in this repo store assets under ``<person>/arkitWithBSData/`` while
+    ``--avatar`` often points at ``<person>/`` (e.g. ``lam3d_avatar/third``).
+    """
+    root = Path(avatar_dir)
+    if (root / "offset.ply").is_file() and (root / "skin.glb").is_file():
+        return root
+    sub = root / ARKIT_SUBDIR
+    if (sub / "offset.ply").is_file() and (sub / "skin.glb").is_file():
+        return sub
+    return root
 
 
 def _common_geometry(avatar: GaussianAvatar):
@@ -90,6 +106,7 @@ def _common_geometry(avatar: GaussianAvatar):
 
 
 def bake_spl1(avatar_dir: str | Path, out_path: str | Path, *, dyn_threshold: float = 0.02) -> None:
+    avatar_dir = resolve_avatar_dir(avatar_dir)
     avatar = GaussianAvatar(avatar_dir)
     names, fps, weights = _load_bsdata(avatar.dir / "bsData.json")
     weights = np.asarray(weights, np.float32)
@@ -207,6 +224,7 @@ def bake_spl2(
     fps: float = DEFAULT_FPS,
     animation: str = "",
 ) -> None:
+    avatar_dir = resolve_avatar_dir(avatar_dir)
     avatar = GaussianAvatar(avatar_dir)
     morph_names = _morph_candidates(avatar, morph_set)
     if not morph_names:
@@ -224,7 +242,7 @@ def bake_spl2(
 
     eye, center, up, fovy = auto_camera(base)
     cam = np.array([*eye, *center, *up, fovy], np.float32)
-    head = _bake_head_sequence(Path(avatar_dir), animation=animation, fps=fps)
+    head = _bake_head_sequence(avatar_dir, animation=animation, fps=fps)
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -278,7 +296,7 @@ def main() -> int:
     )
     args = p.parse_args()
     if args.list_animations:
-        glb = Path(args.avatar) / "animation.glb"
+        glb = resolve_avatar_dir(args.avatar) / "animation.glb"
         if not glb.is_file():
             raise SystemExit(f"animation.glb not found: {glb}")
         print("animations:", Skeleton(glb).anim_names)
