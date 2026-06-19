@@ -42,6 +42,8 @@ class AvatarPack private constructor(
     val headClipDurationSec: Float = 0f,
     /** row-major 4x4 per keyframe, layout [k*16 + e], length H*16 */
     val headMatrices: FloatArray? = null,
+    /** Pivot for head rotation (mesh space), length 3. */
+    val headPivot: FloatArray? = null,
 ) {
     val hasHeadAnimation: Boolean
         get() = headMatrices != null && headFrameCount > 0
@@ -145,11 +147,11 @@ class AvatarPack private constructor(
             bb.get(dyn)
             val deltas = readFloats(bb, m * n * 3)
             val weights = if (geometryOnly) FloatArray(0) else readFloats(bb, f * m)
-            val head = if (geometryOnly) parseHeadTrailer(bb) else HeadTrailer(null, 0f, null)
+            val head = if (geometryOnly) parseHeadTrailer(bb, base) else HeadTrailer(null, 0f, null, null)
 
             return AvatarPack(
                 n, m, f, fps, names, geometryOnly, cam, base, cov6, color, opacity, dyn, deltas, weights,
-                head.name, head.clipDurationSec, head.matrices,
+                head.name, head.clipDurationSec, head.matrices, head.pivot,
             )
         }
 
@@ -157,26 +159,36 @@ class AvatarPack private constructor(
             val name: String?,
             val clipDurationSec: Float,
             val matrices: FloatArray?,
+            val pivot: FloatArray?,
         )
 
-        private fun parseHeadTrailer(bb: ByteBuffer): HeadTrailer {
-            if (bb.remaining() < 4) return HeadTrailer(null, 0f, null)
+        private fun parseHeadTrailer(bb: ByteBuffer, base: FloatArray): HeadTrailer {
+            if (bb.remaining() < 4) return HeadTrailer(null, 0f, null, null)
             val pos = bb.position()
             val magic = ByteArray(4)
             bb.get(magic)
             if (String(magic, Charsets.US_ASCII) != "HEAD") {
                 bb.position(pos)
-                return HeadTrailer(null, 0f, null)
+                return HeadTrailer(null, 0f, null, null)
             }
             val h = bb.int
             val clipDur = bb.float
             val nameLen = bb.get().toInt() and 0xFF
-            require(bb.remaining() >= nameLen + h * 16 * 4) { "truncated HEAD trailer" }
+            val matBytes = h * 16 * 4
+            require(bb.remaining() >= nameLen + matBytes) { "truncated HEAD trailer" }
             val nameBytes = ByteArray(nameLen)
             bb.get(nameBytes)
             val name = String(nameBytes, Charsets.US_ASCII)
-            val matrices = readFloats(bb, h * 16)
-            return HeadTrailer(name, clipDur, matrices)
+            val pivot: FloatArray
+            val matrices: FloatArray
+            if (bb.remaining() >= matBytes + 12) {
+                pivot = readFloats(bb, 3)
+                matrices = readFloats(bb, h * 16)
+            } else {
+                pivot = HeadBone.centroid(base)
+                matrices = HeadBone.convertLegacySkinMatrices(readFloats(bb, h * 16), h)
+            }
+            return HeadTrailer(name, clipDur, matrices, pivot)
         }
 
         private fun readFloats(bb: ByteBuffer, count: Int): FloatArray {
