@@ -49,11 +49,7 @@ class SplatRenderer(
 
     fun setRenderMode(mode: RenderMode) {
         renderMode = mode
-        if (!mode.usesMouthScissor()) {
-            mouthScissor = null
-        } else {
-            updateMouthScissor()
-        }
+        setPhotoComposite(AppConfig.PHOTO_COMPOSITE)
     }
 
     @Volatile var headBoneEnabled = AppConfig.HEAD_BONE_ENABLED
@@ -65,6 +61,16 @@ class SplatRenderer(
         prefetchBuilder.headBoneEnabled = enabled
         if (enabled && pack.hasHeadAnimation) {
             baseReady = false
+        }
+    }
+
+    @Volatile var photoComposite = AppConfig.PHOTO_COMPOSITE
+        private set
+
+    fun setPhotoComposite(enabled: Boolean) {
+        photoComposite = enabled
+        if (!enabled) {
+            mouthScissor = null
         }
     }
 
@@ -105,11 +111,7 @@ class SplatRenderer(
     }
 
     private fun updateMouthScissor() {
-        if (!renderMode.usesMouthScissor()) {
-            mouthScissor = null
-            return
-        }
-        if (renderMode == RenderMode.MOUTH_ON_PHOTO && !photoReady) {
+        if (!photoComposite || !photoReady) {
             mouthScissor = null
             return
         }
@@ -117,6 +119,12 @@ class SplatRenderer(
             pack, rot, tv, fy, sq * 0.5f, sq * 0.5f, sq.toFloat(), sq.toFloat(),
         )
     }
+
+    private fun compositeMouthOnly(): Boolean =
+        AppConfig.useCompositeMouthOnly(pack)
+
+    private fun usePhotoBackground(): Boolean =
+        photoComposite && photoReady
 
     @Volatile var surfaceReady = false
         private set
@@ -210,7 +218,7 @@ class SplatRenderer(
         setupCamera()
         setupBaseFbo()
         baseReady = false
-        if (renderMode.usesPhotoBackground()) reloadPhotoTexture()
+        if (photoComposite) reloadPhotoTexture()
         updateMouthScissor()
         surfaceReady = true
         callbacks.onSurfaceReady()
@@ -340,7 +348,7 @@ class SplatRenderer(
         val tDraw = System.nanoTime()
         if (cached != null) {
             drawScene(cached, instSize)
-        } else if (renderMode == RenderMode.MOUTH_ON_PHOTO && photoReady) {
+        } else if (usePhotoBackground()) {
             drawPhotoOnly()
         } else {
             renderBackgroundOnly()
@@ -404,16 +412,15 @@ class SplatRenderer(
         GLES30.glClearColor(bgR, bgG, bgB, 1f)
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
         GLES30.glViewport(ox, oy, sq, sq)
-        when (renderMode) {
-            RenderMode.MOUTH_ON_PHOTO -> if (photoReady) drawPhotoQuad(photoTex)
-            RenderMode.MOUTH_ON_STATIC -> if (AppConfig.needsStaticGaussianBase(pack)) {
+        when {
+            usePhotoBackground() -> drawPhotoQuad(photoTex)
+            compositeMouthOnly() -> {
                 ensureBase()
                 drawQuad(baseTex)
             }
-            else -> Unit
         }
         if (instSize > 0) {
-            val sc = if (renderMode.usesMouthScissor()) mouthScissor else null
+            val sc = if (usePhotoBackground()) mouthScissor else null
             drawSplats(instVbo, cached.instanceCount, sc)
         }
     }

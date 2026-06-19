@@ -175,6 +175,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
     }
 
     private var renderModeSpinnerBusy = false
+    private var previewRebuildPending = false
 
     private fun setupRenderModeSpinner() {
         val modes = RenderMode.entries
@@ -208,25 +209,29 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
                     return
                 }
 
-                AppConfig.RENDER_MODE = mode
-                if (!mode.allowsHeadBone() && AppConfig.HEAD_BONE_ENABLED) {
-                    AppConfig.HEAD_BONE_ENABLED = false
-                    binding.headBoneSwitch.isChecked = false
-                    syncHeadBoneToBuilders()
-                }
-                renderer?.setRenderMode(mode)
-                updateHeadBoneSwitchState(pack)
-                glView?.queueEvent {
-                    if (mode == RenderMode.MOUTH_ON_PHOTO) renderer?.reloadPhotoTexture()
-                    runOnUiThread {
-                        perfStats.reset()
-                        rebuildPreview()
-                        refreshStats(splatCount(pack))
-                    }
-                }
+                applyRenderMode(mode)
             }
 
             override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+    }
+
+    private fun applyRenderMode(mode: RenderMode) {
+        AppConfig.RENDER_MODE = mode
+        if (!mode.allowsHeadBone() && AppConfig.HEAD_BONE_ENABLED) {
+            AppConfig.HEAD_BONE_ENABLED = false
+            binding.headBoneSwitch.isChecked = false
+            syncHeadBoneToBuilders()
+        }
+        renderer?.setRenderMode(mode)
+        updateHeadBoneSwitchState(pack)
+        glView?.queueEvent {
+            if (AppConfig.PHOTO_COMPOSITE) renderer?.reloadPhotoTexture()
+            runOnUiThread {
+                perfStats.reset()
+                rebuildPreview()
+                refreshStats(splatCount(pack))
+            }
         }
     }
 
@@ -313,7 +318,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         view.renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
         glView = view
         view.queueEvent {
-            if (AppConfig.RENDER_MODE == RenderMode.MOUTH_ON_PHOTO) r.reloadPhotoTexture()
+            if (AppConfig.PHOTO_COMPOSITE) r.reloadPhotoTexture()
         }
         view.onResume()
 
@@ -343,17 +348,13 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
 
     private fun updateRenderModeSpinnerState() {
         val modes = RenderMode.entries
-        val hasPhoto = AppConfig.photoFile().isFile
-        if (!hasPhoto && AppConfig.RENDER_MODE == RenderMode.MOUTH_ON_PHOTO) {
+        if (!AppConfig.photoFile().isFile && AppConfig.RENDER_MODE == RenderMode.MOUTH_ON_PHOTO) {
             AppConfig.RENDER_MODE = RenderMode.MOUTH_ON_STATIC
             renderModeSpinnerBusy = true
             binding.renderModeSpinner.setSelection(modes.indexOf(AppConfig.RENDER_MODE).coerceAtLeast(0))
             renderModeSpinnerBusy = false
             renderer?.setRenderMode(AppConfig.RENDER_MODE)
         }
-        val busy = playback.state == PlaybackState.WARMING_UP || playback.state == PlaybackState.PLAYING
-        binding.renderModeSpinner.isEnabled = !busy
-        binding.renderModeSpinner.alpha = if (busy) 0.45f else 1f
     }
 
     /**
@@ -373,6 +374,8 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
             }
             return
         }
+        if (previewRebuildPending) return
+        previewRebuildPending = true
         rebuildPreview()
     }
 
@@ -386,6 +389,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
     private fun rebuildPreview() {
         val pf = prefetcher ?: return
         val mouthOnly = AppConfig.useMouthOnlyIndices(pack ?: return)
+        previewRebuildPending = true
         pf.cancel()
         frameCache.clear()
         pf.resetCancel()
@@ -404,6 +408,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
 
     private val previewListener = object : FramePrefetcher.Listener {
         override fun onWarmupComplete() {
+            previewRebuildPending = false
             runOnUiThread {
                 val cached = frameCache.get(0)
                 refreshStats(cached?.instanceCount ?: splatCount(pack))
@@ -415,6 +420,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         }
 
         override fun onError(message: String) {
+            previewRebuildPending = false
             runOnUiThread { Toast.makeText(this@MainActivity, message, Toast.LENGTH_SHORT).show() }
         }
     }
@@ -630,7 +636,8 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         }
         binding.playButton.isEnabled = busy || canStart
         binding.pickAudioButton.isEnabled = !busy && currentMode == AppConfig.AudioInputMode.FILE
-        updateRenderModeSpinnerState()
+        binding.renderModeSpinner.isEnabled = !busy
+        binding.renderModeSpinner.alpha = if (busy) 0.45f else 1f
         binding.headBoneSwitch.isEnabled = !busy && pack?.hasHeadAnimation == true && AppConfig.allowsHeadBone()
         binding.threadSpinner.isEnabled = !busy
     }

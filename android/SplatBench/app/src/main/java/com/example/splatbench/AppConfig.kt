@@ -83,25 +83,59 @@ object AppConfig {
 
     /** Avatar display preset (runtime-toggleable from the UI). */
     @Volatile var RENDER_MODE: RenderMode = RenderMode.MOUTH_ON_STATIC
+        set(value) {
+            field = value
+            syncLegacyFlagsFromRenderMode()
+        }
+
+    /** Legacy flag: mouth-only composite (dynamic splats over static base). */
+    @Volatile var MOUTH_ONLY = true
+        private set
+
+    /** Legacy flag: photo background instead of static Gaussian base. */
+    @Volatile var PHOTO_COMPOSITE = false
+        private set
 
     /** Apply baked head-bone matrices from the SPL2 HEAD trailer (runtime toggle). */
     @Volatile var HEAD_BONE_ENABLED = false
 
-    /** Build/render only the dynamic (mouth) Gaussian subset. */
-    fun useMouthOnlyIndices(pack: AvatarPack): Boolean = when (RENDER_MODE) {
-        RenderMode.FULL -> false
-        RenderMode.MOUTH_ON_STATIC -> !(HEAD_BONE_ENABLED && pack.hasHeadAnimation)
-        RenderMode.MOUTH_ON_PHOTO, RenderMode.MOUTH_CROP_ONLY -> true
+    private fun syncLegacyFlagsFromRenderMode() {
+        when (RENDER_MODE) {
+            RenderMode.FULL -> {
+                MOUTH_ONLY = false
+                PHOTO_COMPOSITE = false
+            }
+            RenderMode.MOUTH_ON_STATIC -> {
+                MOUTH_ONLY = true
+                PHOTO_COMPOSITE = false
+            }
+            RenderMode.MOUTH_ON_PHOTO -> {
+                MOUTH_ONLY = true
+                PHOTO_COMPOSITE = true
+            }
+            RenderMode.MOUTH_CROP_ONLY -> {
+                MOUTH_ONLY = true
+                PHOTO_COMPOSITE = false
+            }
+        }
     }
 
-    /** Pre-render static Gaussians into the base FBO. */
-    fun needsStaticGaussianBase(pack: AvatarPack): Boolean =
-        RENDER_MODE == RenderMode.MOUTH_ON_STATIC &&
+    init {
+        syncLegacyFlagsFromRenderMode()
+    }
+
+    fun useCompositeMouthOnly(pack: AvatarPack): Boolean =
+        MOUTH_ONLY &&
+            RENDER_MODE != RenderMode.MOUTH_CROP_ONLY &&
             !(HEAD_BONE_ENABLED && pack.hasHeadAnimation)
 
-    fun usesPhotoBackground(): Boolean = RENDER_MODE.usesPhotoBackground()
+    /** Build/render only the dynamic (mouth) Gaussian subset. */
+    fun useMouthOnlyIndices(pack: AvatarPack): Boolean =
+        PHOTO_COMPOSITE || RENDER_MODE == RenderMode.MOUTH_CROP_ONLY || useCompositeMouthOnly(pack)
 
-    fun usesMouthScissor(): Boolean = RENDER_MODE.usesMouthScissor()
+    /** Pre-render static Gaussians into the base FBO (not used in photo / crop-only). */
+    fun needsStaticGaussianBase(pack: AvatarPack): Boolean =
+        useCompositeMouthOnly(pack) && !PHOTO_COMPOSITE
 
     fun allowsHeadBone(): Boolean = RENDER_MODE.allowsHeadBone()
 
