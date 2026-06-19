@@ -6,6 +6,7 @@ plugins {
 android {
     namespace = "com.example.splatbench"
     compileSdk = 34
+    ndkVersion = "30.0.14904198"
 
     defaultConfig {
         applicationId = "com.example.splatbench"

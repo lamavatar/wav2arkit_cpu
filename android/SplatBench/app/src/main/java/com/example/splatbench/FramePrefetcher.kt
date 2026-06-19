@@ -25,7 +25,7 @@ class FramePrefetcher(
 
     interface Listener {
         fun onWarmupProgress(built: Int, total: Int) {}
-        fun onWarmupComplete()
+        fun onWarmupComplete() {}
         fun onError(message: String)
     }
 
@@ -66,7 +66,10 @@ class FramePrefetcher(
                 val cached = builder.buildCached(0, weights, idx, exec, threadCount)
                 val buildMs = (System.nanoTime() - t0) / 1_000_000.0
                 perfStats?.addBuild(buildMs)
-                if (gen == previewGen.get()) cache.put(cached.copy(buildMs = buildMs))
+                if (gen == previewGen.get()) {
+                    cache.put(cached.copy(buildMs = buildMs))
+                    listener?.onWarmupComplete()
+                }
             } catch (e: Exception) {
                 listener?.onError(e.message ?: "neutral preview build failed")
             }
