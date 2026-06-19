@@ -107,8 +107,8 @@ class SplatRenderer(
         return Bitmap.createBitmap(src, x, y, side, side)
     }
 
-    private fun manualCropPixels(): IntArray? {
-        if (!AppConfig.usesManualMouthCrop() || sq <= 0) return null
+    private fun mouthCropPixels(): IntArray? {
+        if (sq <= 0) return null
         return MouthCropConfig.toPixels(sq)
     }
 
@@ -128,12 +128,15 @@ class SplatRenderer(
     private var splatProg = 0
     private var quadProg = 0
     private var photoQuadProg = 0
+    private var mouthPatchProg = 0
     private var vao = 0
     private var cornerVbo = 0
     private var instVbo = 0
     private var staticVbo = 0
     private var quadVbo = 0
     private var quadVao = 0
+    private var mouthPatchVao = 0
+    private var mouthPatchVbo = 0
     private var baseFbo = 0
     private var baseTex = 0
     private var sceneFbo = 0
@@ -143,10 +146,7 @@ class SplatRenderer(
     private var uViewport = 0
     private var uTex = 0
     private var uPhotoTex = 0
-    private var uMouthTransformActive = 0
-    private var uMouthPivot = 0
-    private var uMouthOffset = 0
-    private var uMouthScale = 0
+    private var uPatchTex = 0
 
     private var surfW = 1
     private var surfH = 1
@@ -182,20 +182,19 @@ class SplatRenderer(
         splatProg = link(SPLAT_VS, SPLAT_FS)
         quadProg = link(QUAD_VS, QUAD_FS)
         photoQuadProg = link(QUAD_VS, QUAD_PHOTO_FS)
+        mouthPatchProg = link(MOUTH_PATCH_VS, MOUTH_PATCH_FS)
         uViewport = GLES30.glGetUniformLocation(splatProg, "viewport")
-        uMouthTransformActive = GLES30.glGetUniformLocation(splatProg, "mouthTransformActive")
-        uMouthPivot = GLES30.glGetUniformLocation(splatProg, "mouthPivot")
-        uMouthOffset = GLES30.glGetUniformLocation(splatProg, "mouthOffset")
-        uMouthScale = GLES30.glGetUniformLocation(splatProg, "mouthScale")
         uTex = GLES30.glGetUniformLocation(quadProg, "tex")
         uPhotoTex = GLES30.glGetUniformLocation(photoQuadProg, "tex")
+        uPatchTex = GLES30.glGetUniformLocation(mouthPatchProg, "tex")
 
-        val ids = IntArray(4)
-        GLES30.glGenBuffers(4, ids, 0)
+        val ids = IntArray(5)
+        GLES30.glGenBuffers(5, ids, 0)
         cornerVbo = ids[0]; instVbo = ids[1]; staticVbo = ids[2]; quadVbo = ids[3]
-        val vaos = IntArray(2)
-        GLES30.glGenVertexArrays(2, vaos, 0)
-        vao = vaos[0]; quadVao = vaos[1]
+        mouthPatchVbo = ids[4]
+        val vaos = IntArray(3)
+        GLES30.glGenVertexArrays(3, vaos, 0)
+        vao = vaos[0]; quadVao = vaos[1]; mouthPatchVao = vaos[2]
 
         val corners = floatArrayOf(-1f, -1f, 1f, -1f, 1f, 1f, -1f, -1f, 1f, 1f, -1f, 1f)
         uploadStatic(cornerVbo, corners)
@@ -206,6 +205,14 @@ class SplatRenderer(
         GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, quadVbo)
         GLES30.glEnableVertexAttribArray(0)
         GLES30.glVertexAttribPointer(0, 2, GLES30.GL_FLOAT, false, 8, 0)
+        GLES30.glBindVertexArray(0)
+
+        GLES30.glBindVertexArray(mouthPatchVao)
+        GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, mouthPatchVbo)
+        GLES30.glEnableVertexAttribArray(0)
+        GLES30.glVertexAttribPointer(0, 2, GLES30.GL_FLOAT, false, 16, 0)
+        GLES30.glEnableVertexAttribArray(1)
+        GLES30.glVertexAttribPointer(1, 2, GLES30.GL_FLOAT, false, 16, 8)
         GLES30.glBindVertexArray(0)
 
         GLES30.glDisable(GLES30.GL_DEPTH_TEST)
@@ -422,25 +429,118 @@ class SplatRenderer(
     }
 
     private fun drawScene(cached: CachedFrame, instSize: Int) {
-        if (AppConfig.usesFramebufferCrop()) {
-            drawSceneFramebufferCrop(cached, instSize)
-            return
+        when {
+            AppConfig.usesFramebufferCrop() -> drawSceneFramebufferCrop(cached, instSize)
+            usePhotoBackground() -> drawScenePhotoComposite(cached, instSize)
+            else -> drawSceneNormal(cached, instSize)
         }
+    }
+
+    private fun drawSceneNormal(cached: CachedFrame, instSize: Int) {
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
         GLES30.glViewport(0, 0, surfW, surfH)
         GLES30.glClearColor(bgR, bgG, bgB, 1f)
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
         GLES30.glViewport(ox, oy, sq, sq)
-        when {
-            usePhotoBackground() -> drawPhotoQuad(photoTex)
-            AppConfig.needsStaticGaussianBase(pack) -> {
-                ensureBase()
-                drawQuad(baseTex)
-            }
+        if (AppConfig.needsStaticGaussianBase(pack)) {
+            ensureBase()
+            drawQuad(baseTex)
         }
         if (instSize > 0) {
-            drawSplats(instVbo, cached.instanceCount, photoOverlay = usePhotoBackground())
+            drawSplats(instVbo, cached.instanceCount)
         }
+    }
+
+    /**
+     * Photo composite: full avatar → crop [MouthCropConfig] from FBO → overlay patch on photo
+     * with [MouthPhotoOverlayConfig] transform (no sparse splats on photo).
+     */
+    private fun drawScenePhotoComposite(cached: CachedFrame, instSize: Int) {
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+        GLES30.glViewport(0, 0, surfW, surfH)
+        GLES30.glClearColor(bgR, bgG, bgB, 1f)
+        GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
+        GLES30.glViewport(ox, oy, sq, sq)
+        drawPhotoQuad(photoTex)
+
+        if (instSize <= 0) return
+
+        renderFullSceneToFbo(cached.instanceCount)
+        GLES30.glViewport(ox, oy, sq, sq)
+        val crop = mouthCropPixels() ?: return
+        drawMouthPatchComposite(crop)
+    }
+
+    private fun renderFullSceneToFbo(instanceCount: Int) {
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, sceneFbo)
+        GLES30.glViewport(0, 0, sq, sq)
+        GLES30.glClearColor(bgR, bgG, bgB, 1f)
+        GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
+        if (instanceCount > 0) {
+            drawSplats(instVbo, instanceCount)
+        }
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+    }
+
+    private fun transformPatchPoint(px: Float, py: Float): Pair<Float, Float> {
+        val pivotX = MouthPhotoOverlayConfig.pivotXPx(sq)
+        val pivotY = MouthPhotoOverlayConfig.pivotYPx(sq)
+        val offX = MouthPhotoOverlayConfig.offsetXPx(sq)
+        val offY = MouthPhotoOverlayConfig.offsetYPx(sq)
+        val s = MouthPhotoOverlayConfig.SCALE
+        val x = (px - pivotX) * s + pivotX + offX
+        val y = (py - pivotY) * s + pivotY + offY
+        return x to y
+    }
+
+    private fun sqPxToNdc(px: Float, py: Float): Pair<Float, Float> =
+        (px / sq * 2f - 1f) to (1f - py / sq * 2f)
+
+    /** Draw cropped mouth patch from [sceneTex] with photo overlay transform. */
+    private fun drawMouthPatchComposite(crop: IntArray) {
+        val cx = crop[0].toFloat()
+        val cy = crop[1].toFloat()
+        val cw = crop[2].toFloat()
+        val ch = crop[3].toFloat()
+        val u0 = cx / sq
+        val u1 = (cx + cw) / sq
+        val v0 = 1f - (cy + ch) / sq
+        val v1 = 1f - cy / sq
+
+        val tl = transformPatchPoint(cx, cy)
+        val tr = transformPatchPoint(cx + cw, cy)
+        val br = transformPatchPoint(cx + cw, cy + ch)
+        val bl = transformPatchPoint(cx, cy + ch)
+
+        fun vtx(px: Float, py: Float, u: Float, v: Float): FloatArray {
+            val (nx, ny) = sqPxToNdc(px, py)
+            return floatArrayOf(nx, ny, u, v)
+        }
+
+        val data = floatArrayOf(
+            *vtx(tl.first, tl.second, u0, v1),
+            *vtx(tr.first, tr.second, u1, v1),
+            *vtx(bl.first, bl.second, u0, v0),
+            *vtx(tr.first, tr.second, u1, v1),
+            *vtx(br.first, br.second, u1, v0),
+            *vtx(bl.first, bl.second, u0, v0),
+        )
+        val bb = ByteBuffer.allocateDirect(data.size * 4).order(ByteOrder.nativeOrder())
+        bb.asFloatBuffer().put(data)
+        bb.position(0)
+        GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, mouthPatchVbo)
+        GLES30.glBufferData(GLES30.GL_ARRAY_BUFFER, data.size * 4, bb, GLES30.GL_DYNAMIC_DRAW)
+
+        GLES30.glUseProgram(mouthPatchProg)
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, sceneTex)
+        GLES30.glUniform1i(uPatchTex, 0)
+        GLES30.glEnable(GLES30.GL_BLEND)
+        GLES30.glBlendFunc(GLES30.GL_ONE, GLES30.GL_ONE_MINUS_SRC_ALPHA)
+        GLES30.glBindVertexArray(mouthPatchVao)
+        GLES30.glDrawArrays(GLES30.GL_TRIANGLES, 0, 6)
+        GLES30.glBindVertexArray(0)
+        GLES30.glDisable(GLES30.GL_BLEND)
     }
 
     /**
@@ -448,16 +548,9 @@ class SplatRenderer(
      * crop rect at its original position and size (1:1, not zoomed).
      */
     private fun drawSceneFramebufferCrop(cached: CachedFrame, instSize: Int) {
-        val crop = manualCropPixels()
+        val crop = mouthCropPixels()
 
-        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, sceneFbo)
-        GLES30.glViewport(0, 0, sq, sq)
-        GLES30.glClearColor(bgR, bgG, bgB, 1f)
-        GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
-        if (instSize > 0) {
-            drawSplats(instVbo, cached.instanceCount)
-        }
-        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+        renderFullSceneToFbo(cached.instanceCount)
 
         GLES30.glViewport(0, 0, surfW, surfH)
         GLES30.glClearColor(bgR, bgG, bgB, 1f)
@@ -506,26 +599,10 @@ class SplatRenderer(
         GLES30.glBindFramebuffer(GLES30.GL_DRAW_FRAMEBUFFER, 0)
     }
 
-    private fun drawSplats(vbo: Int, count: Int, photoOverlay: Boolean = false) {
+    private fun drawSplats(vbo: Int, count: Int) {
         if (count <= 0) return
         GLES30.glUseProgram(splatProg)
         GLES30.glUniform2f(uViewport, sq.toFloat(), sq.toFloat())
-        if (photoOverlay) {
-            GLES30.glUniform1f(uMouthTransformActive, 1f)
-            GLES30.glUniform2f(
-                uMouthPivot,
-                MouthPhotoOverlayConfig.pivotXPx(sq),
-                MouthPhotoOverlayConfig.pivotYPx(sq),
-            )
-            GLES30.glUniform2f(
-                uMouthOffset,
-                MouthPhotoOverlayConfig.offsetXPx(sq),
-                MouthPhotoOverlayConfig.offsetYPx(sq),
-            )
-            GLES30.glUniform1f(uMouthScale, MouthPhotoOverlayConfig.SCALE)
-        } else {
-            GLES30.glUniform1f(uMouthTransformActive, 0f)
-        }
         GLES30.glEnable(GLES30.GL_BLEND)
         GLES30.glBlendFunc(GLES30.GL_ONE, GLES30.GL_ONE_MINUS_SRC_ALPHA)
 
@@ -613,33 +690,37 @@ class SplatRenderer(
             layout(location=4) in vec3 i_color;
             layout(location=5) in float i_alpha;
             uniform vec2 viewport;
-            uniform float mouthTransformActive;
-            uniform vec2 mouthPivot;
-            uniform vec2 mouthOffset;
-            uniform float mouthScale;
             out vec2 v_d;
             out vec3 v_conic;
             out vec3 v_color;
             out float v_alpha;
             void main() {
-                vec2 center = i_center;
-                float radius = i_radius;
-                vec3 conic = i_conic;
-                if (mouthTransformActive > 0.5) {
-                    center = (i_center - mouthPivot) * mouthScale + mouthPivot + mouthOffset;
-                    radius = i_radius * mouthScale;
-                    float invS2 = 1.0 / (mouthScale * mouthScale);
-                    conic = i_conic * invS2;
-                }
-                vec2 off = corner * radius;
-                vec2 pix = center + off;
+                vec2 off = corner * i_radius;
+                vec2 pix = i_center + off;
                 vec2 ndc = vec2(pix.x / viewport.x * 2.0 - 1.0, 1.0 - pix.y / viewport.y * 2.0);
                 gl_Position = vec4(ndc, 0.0, 1.0);
                 v_d = off;
-                v_conic = conic;
+                v_conic = i_conic;
                 v_color = i_color;
                 v_alpha = i_alpha;
             }"""
+
+        private const val MOUTH_PATCH_VS = """#version 300 es
+            precision highp float;
+            layout(location=0) in vec2 pos;
+            layout(location=1) in vec2 uv;
+            out vec2 v_uv;
+            void main() {
+                v_uv = uv;
+                gl_Position = vec4(pos, 0.0, 1.0);
+            }"""
+
+        private const val MOUTH_PATCH_FS = """#version 300 es
+            precision mediump float;
+            in vec2 v_uv;
+            uniform sampler2D tex;
+            out vec4 c;
+            void main() { c = texture(tex, v_uv); }"""
 
         private const val SPLAT_FS = """#version 300 es
             precision highp float;

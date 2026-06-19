@@ -65,10 +65,10 @@ class PhotoOverlayGuide @JvmOverloads constructor(
     val vh = height.toFloat()
     if (vw <= 0f || vh <= 0f) return
 
-    val refL = MouthPhotoOverlayConfig.REF_X * vw
-    val refT = MouthPhotoOverlayConfig.REF_Y * vh
-    val refR = refL + MouthPhotoOverlayConfig.REF_W * vw
-    val refB = refT + MouthPhotoOverlayConfig.REF_H * vh
+    val refL = MouthCropConfig.X * vw
+    val refT = MouthCropConfig.Y * vh
+    val refR = refL + MouthCropConfig.W * vw
+    val refB = refT + MouthCropConfig.H * vh
 
     val tl = transform(refL, refT, vw, vh)
     val tr = transform(refR, refT, vw, vh)

@@ -1,8 +1,8 @@
 package com.example.splatbench
 
 /**
- * Manual 2D transform for dynamic mouth splats composited over [AppConfig.PHOTO_FILE_NAME].
- * Offset and pivot are fractions of the square viewport (top-left origin).
+ * Manual 2D transform for the cropped mouth patch composited over [AppConfig.PHOTO_FILE_NAME].
+ * Crop rect comes from [MouthCropConfig]; this only positions/scales the patch on the photo.
  */
 object MouthPhotoOverlayConfig {
 
@@ -23,12 +23,6 @@ object MouthPhotoOverlayConfig {
 
   /** Draw alignment guide on the photo viewport. */
   @Volatile var GUIDE_ENABLED = true
-
-  /** Neutral mouth bounds used only for the on-screen alignment guide. */
-  const val REF_X = 0.32f
-  const val REF_Y = 0.52f
-  const val REF_W = 0.36f
-  const val REF_H = 0.28f
 
   fun offsetXPx(viewportSq: Int): Float = OFFSET_X * viewportSq
   fun offsetYPx(viewportSq: Int): Float = OFFSET_Y * viewportSq

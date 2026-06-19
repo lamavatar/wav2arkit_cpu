@@ -299,7 +299,8 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         val show = AppConfig.usesPhotoMouthOverlay()
         binding.photoPanel.visibility = if (show) View.VISIBLE else View.GONE
         binding.photoOverlayGuide.guideEnabled = show && MouthPhotoOverlayConfig.GUIDE_ENABLED
-        binding.photoValueLabel.text = MouthPhotoOverlayConfig.format()
+        binding.photoValueLabel.text =
+            "${MouthCropConfig.formatRatios()} | ${MouthPhotoOverlayConfig.format()}"
         binding.photoOverlayGuide.syncFromConfig()
     }
 

@@ -1,8 +1,9 @@
 package com.example.splatbench
 
 /**
- * Manual mouth crop rectangle for [RenderMode.MOUTH_CROP_ONLY] only.
- * Adjust via the on-screen sliders; [GUIDE_ENABLED] shows alignment lines before crop is applied.
+ * Manual mouth crop rectangle (top-left origin, normalized 0..1).
+ * Used by [RenderMode.MOUTH_CROP_ONLY] display and as the extract region for
+ * [RenderMode.MOUTH_ON_PHOTO] compositing.
  */
 object MouthCropConfig {
 
