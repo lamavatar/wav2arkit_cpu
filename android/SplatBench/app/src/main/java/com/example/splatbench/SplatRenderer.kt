@@ -47,6 +47,21 @@ class SplatRenderer(
         mouthOnly = enabled
     }
 
+    @Volatile var headBoneEnabled = AppConfig.HEAD_BONE_ENABLED
+        private set
+
+    fun setHeadBoneEnabled(enabled: Boolean) {
+        headBoneEnabled = enabled
+        builder.headBoneEnabled = enabled
+        prefetchBuilder.headBoneEnabled = enabled
+        if (enabled && pack.hasHeadAnimation) {
+            baseReady = false
+        }
+    }
+
+    private fun compositeMouthOnly(): Boolean =
+        AppConfig.useCompositeMouthOnly(pack)
+
     @Volatile var surfaceReady = false
         private set
 
@@ -172,7 +187,7 @@ class SplatRenderer(
     }
 
     fun ensureStaticBase() {
-        if (!mouthOnly) return
+        if (!compositeMouthOnly()) return
         baseReady = false
         ensureBase()
     }
@@ -204,7 +219,7 @@ class SplatRenderer(
     private fun ensureBase() {
         if (baseReady) return
         val zero = FloatArray(pack.numMorphs)
-        staticCount = build(zero, staticIndices())
+        staticCount = build(zero, staticIndices(), 0)
         GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, staticVbo)
         GLES30.glBufferData(GLES30.GL_ARRAY_BUFFER, staticCount * 40, builder.instanceBytes, GLES30.GL_STATIC_DRAW)
 
@@ -228,8 +243,8 @@ class SplatRenderer(
         return out
     }
 
-    private fun build(weights: FloatArray, indices: IntArray): Int =
-        builder.build(weights, indices, liveExec, buildThreads)
+    private fun build(weights: FloatArray, indices: IntArray, frameIndex: Int = 0): Int =
+        builder.build(weights, indices, liveExec, buildThreads, frameIndex)
 
     override fun onDrawFrame(gl: GL10?) {
         val frameStartUptime = SystemClock.uptimeMillis()
@@ -251,7 +266,7 @@ class SplatRenderer(
             state == PlaybackState.DONE -> frameCache.get(frameIdx) ?: frameCache.get(0)
             else -> frameCache.get(0)
         }
-        if (cached != null && mouthOnly) ensureBase()
+        if (cached != null && compositeMouthOnly()) ensureBase()
 
         val tGeom = System.nanoTime()
         val instSize = if (cached != null) uploadInstance(cached) else 0
@@ -259,7 +274,7 @@ class SplatRenderer(
 
         val tDraw = System.nanoTime()
         if (cached != null) {
-            drawScene(cached, mouthOnly, instSize)
+            drawScene(cached, compositeMouthOnly(), instSize)
         } else {
             renderBackgroundOnly()
         }

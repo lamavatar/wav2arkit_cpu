@@ -189,8 +189,10 @@ class FramePrefetcher(
         return ((fc / src.fps) * 1000.0).toInt()
     }
 
-    private fun renderIndices(mouthOnly: Boolean): IntArray =
-        if (mouthOnly) pack.dynamicIndices else pack.allIndices
+    private fun renderIndices(mouthOnly: Boolean): IntArray {
+        if (AppConfig.HEAD_BONE_ENABLED && pack.hasHeadAnimation) return pack.allIndices
+        return if (mouthOnly) pack.dynamicIndices else pack.allIndices
+    }
 
     private fun buildFrame(frameIndex: Int, mouthOnly: Boolean, indices: IntArray? = null) {
         val idx = indices ?: renderIndices(mouthOnly)
