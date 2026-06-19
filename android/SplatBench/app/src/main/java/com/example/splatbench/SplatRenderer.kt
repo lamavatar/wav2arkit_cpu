@@ -133,6 +133,7 @@ class SplatRenderer(
 
     private var splatProg = 0
     private var quadProg = 0
+    private var photoQuadProg = 0
     private var vao = 0
     private var cornerVbo = 0
     private var instVbo = 0
@@ -146,6 +147,7 @@ class SplatRenderer(
     private var mouthScissor: IntArray? = null
     private var uViewport = 0
     private var uTex = 0
+    private var uPhotoTex = 0
 
     private var surfW = 1
     private var surfH = 1
@@ -180,8 +182,10 @@ class SplatRenderer(
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         splatProg = link(SPLAT_VS, SPLAT_FS)
         quadProg = link(QUAD_VS, QUAD_FS)
+        photoQuadProg = link(QUAD_VS, QUAD_PHOTO_FS)
         uViewport = GLES30.glGetUniformLocation(splatProg, "viewport")
         uTex = GLES30.glGetUniformLocation(quadProg, "tex")
+        uPhotoTex = GLES30.glGetUniformLocation(photoQuadProg, "tex")
 
         val ids = IntArray(4)
         GLES30.glGenBuffers(4, ids, 0)
@@ -398,7 +402,7 @@ class SplatRenderer(
         GLES30.glClearColor(bgR, bgG, bgB, 1f)
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
         GLES30.glViewport(ox, oy, sq, sq)
-        drawQuad(photoTex)
+        drawPhotoQuad(photoTex)
     }
 
     private fun drawScene(cached: CachedFrame, instSize: Int) {
@@ -408,7 +412,7 @@ class SplatRenderer(
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
         GLES30.glViewport(ox, oy, sq, sq)
         when {
-            usePhotoBackground() -> drawQuad(photoTex)
+            usePhotoBackground() -> drawPhotoQuad(photoTex)
             compositeMouthOnly() -> {
                 ensureBase()
                 drawQuad(baseTex)
@@ -461,6 +465,17 @@ class SplatRenderer(
         GLES30.glEnableVertexAttribArray(loc)
         GLES30.glVertexAttribPointer(loc, size, GLES30.GL_FLOAT, false, 40, offset)
         GLES30.glVertexAttribDivisor(loc, 1)
+    }
+
+    private fun drawPhotoQuad(tex: Int) {
+        GLES30.glUseProgram(photoQuadProg)
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, tex)
+        GLES30.glUniform1i(uPhotoTex, 0)
+        GLES30.glDisable(GLES30.GL_BLEND)
+        GLES30.glBindVertexArray(quadVao)
+        GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
+        GLES30.glBindVertexArray(0)
     }
 
     private fun drawQuad(tex: Int) {
@@ -556,5 +571,13 @@ class SplatRenderer(
             uniform sampler2D tex;
             out vec4 c;
             void main() { c = vec4(texture(tex, uv).rgb, 1.0); }"""
+
+        /** Bitmap textures need a vertical flip vs FBO-backed [baseTex]. */
+        private const val QUAD_PHOTO_FS = """#version 300 es
+            precision mediump float;
+            in vec2 uv;
+            uniform sampler2D tex;
+            out vec4 c;
+            void main() { c = vec4(texture(tex, vec2(uv.x, 1.0 - uv.y)).rgb, 1.0); }"""
     }
 }
