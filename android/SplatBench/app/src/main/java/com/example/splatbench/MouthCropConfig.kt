@@ -1,8 +1,8 @@
 package com.example.splatbench
 
 /**
- * Manual mouth crop rectangle in normalized square-viewport coordinates (top-left origin).
- * Adjust via the on-screen sliders; [MOUTH_CROP_GUIDE] draws alignment guides on the GL view.
+ * Manual mouth crop rectangle for [RenderMode.MOUTH_CROP_ONLY] only.
+ * Adjust via the on-screen sliders; [GUIDE_ENABLED] shows alignment lines before crop is applied.
  */
 object MouthCropConfig {
 

@@ -118,6 +118,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         binding.pickAudioButton.isEnabled = false
         setupModeAndThreadControls()
         setupCropControls()
+        setupPhotoOverlayControls()
         updateControls()
 
         binding.pickAudioButton.setOnClickListener {
@@ -241,6 +242,72 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         binding.cropGuideOverlay.syncFromConfig()
     }
 
+    private var photoSeekBusy = false
+
+    private fun setupPhotoOverlayControls() {
+        binding.photoGuideSwitch.isChecked = MouthPhotoOverlayConfig.GUIDE_ENABLED
+        binding.photoGuideSwitch.setOnCheckedChangeListener { _, checked ->
+            MouthPhotoOverlayConfig.GUIDE_ENABLED = checked
+            syncPhotoOverlayUi()
+            glView?.requestRender()
+        }
+
+        syncPhotoSeekbarsFromConfig()
+
+        val seekListener = object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                if (photoSeekBusy || !fromUser) return
+                when (seekBar?.id) {
+                    binding.photoSeekOffsetX.id -> MouthPhotoOverlayConfig.OFFSET_X =
+                        MouthPhotoOverlayConfig.offsetXFromSeek(progress)
+                    binding.photoSeekOffsetY.id -> MouthPhotoOverlayConfig.OFFSET_Y =
+                        MouthPhotoOverlayConfig.offsetYFromSeek(progress)
+                    binding.photoSeekScale.id -> MouthPhotoOverlayConfig.SCALE =
+                        MouthPhotoOverlayConfig.scaleFromSeek(progress)
+                    binding.photoSeekPivotX.id -> MouthPhotoOverlayConfig.PIVOT_X =
+                        MouthPhotoOverlayConfig.pivotFromSeek(progress)
+                    binding.photoSeekPivotY.id -> MouthPhotoOverlayConfig.PIVOT_Y =
+                        MouthPhotoOverlayConfig.pivotFromSeek(progress)
+                }
+                syncPhotoSeekbarsFromConfig()
+                syncPhotoOverlayUi()
+                glView?.requestRender()
+            }
+
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        }
+        binding.photoSeekOffsetX.setOnSeekBarChangeListener(seekListener)
+        binding.photoSeekOffsetY.setOnSeekBarChangeListener(seekListener)
+        binding.photoSeekScale.setOnSeekBarChangeListener(seekListener)
+        binding.photoSeekPivotX.setOnSeekBarChangeListener(seekListener)
+        binding.photoSeekPivotY.setOnSeekBarChangeListener(seekListener)
+        syncPhotoOverlayUi()
+    }
+
+    private fun syncPhotoSeekbarsFromConfig() {
+        photoSeekBusy = true
+        binding.photoSeekOffsetX.progress = MouthPhotoOverlayConfig.seekFromOffset(MouthPhotoOverlayConfig.OFFSET_X)
+        binding.photoSeekOffsetY.progress = MouthPhotoOverlayConfig.seekFromOffset(MouthPhotoOverlayConfig.OFFSET_Y)
+        binding.photoSeekScale.progress = MouthPhotoOverlayConfig.seekFromScale(MouthPhotoOverlayConfig.SCALE)
+        binding.photoSeekPivotX.progress = MouthPhotoOverlayConfig.seekFromPivot(MouthPhotoOverlayConfig.PIVOT_X)
+        binding.photoSeekPivotY.progress = MouthPhotoOverlayConfig.seekFromPivot(MouthPhotoOverlayConfig.PIVOT_Y)
+        photoSeekBusy = false
+    }
+
+    private fun syncPhotoOverlayUi() {
+        val show = AppConfig.usesPhotoMouthOverlay()
+        binding.photoPanel.visibility = if (show) View.VISIBLE else View.GONE
+        binding.photoOverlayGuide.guideEnabled = show && MouthPhotoOverlayConfig.GUIDE_ENABLED
+        binding.photoValueLabel.text = MouthPhotoOverlayConfig.format()
+        binding.photoOverlayGuide.syncFromConfig()
+    }
+
+    private fun syncModePanels() {
+        syncCropUi()
+        syncPhotoOverlayUi()
+    }
+
     private var renderModeSpinnerBusy = false
 
     private fun setupRenderModeSpinner() {
@@ -291,7 +358,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         }
         renderer?.setRenderMode(mode)
         updateHeadBoneSwitchState(pack)
-        syncCropUi()
+        syncModePanels()
         glView?.queueEvent {
             if (AppConfig.PHOTO_COMPOSITE) renderer?.reloadPhotoTexture()
                 runOnUiThread {
@@ -383,7 +450,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         view.setRenderer(r)
         view.renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
         glView = view
-        syncCropUi()
+        syncModePanels()
         view.queueEvent {
             if (AppConfig.PHOTO_COMPOSITE) r.reloadPhotoTexture()
         }
@@ -766,14 +833,14 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
     private fun statLine4(): String {
         val src = currentMode.name
         val ep = onnx?.activeEp ?: "—"
-        val cropStr = if (AppConfig.usesManualMouthCrop()) {
-            " ${MouthCropConfig.formatRatios()}"
-        } else {
-            ""
+        val extra = when {
+            AppConfig.usesManualMouthCrop() -> " ${MouthCropConfig.formatRatios()}"
+            AppConfig.usesPhotoMouthOverlay() -> " ${MouthPhotoOverlayConfig.format()}"
+            else -> ""
         }
         return String.format(
             "src:%s ep:%s audioPos:%dms%s",
-            src, ep, playback.audioPositionMs, cropStr,
+            src, ep, playback.audioPositionMs, extra,
         )
     }
 

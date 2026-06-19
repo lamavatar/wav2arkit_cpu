@@ -25,6 +25,12 @@
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:visibility="gone" />
+
+        <com.example.splatbench.PhotoOverlayGuide
+            android:id="@+id/photoOverlayGuide"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:visibility="gone" />
     </FrameLayout>
 
     <LinearLayout
@@ -201,6 +207,99 @@
 
             <SeekBar
                 android:id="@+id/cropSeekH"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="1000" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/photoPanel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <com.google.android.material.switchmaterial.SwitchMaterial
+                android:id="@+id/photoGuideSwitch"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:checked="true"
+                android:textColor="#E0E0E0"
+                android:text="Mouth overlay guide" />
+
+            <TextView
+                android:id="@+id/photoValueLabel"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:textColor="#9E9E9E"
+                android:textSize="11sp"
+                android:fontFamily="monospace"
+                android:text="mouth: —" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:textColor="#AAAAAA"
+                android:textSize="11sp"
+                android:text="Offset X (left ← → right)" />
+
+            <SeekBar
+                android:id="@+id/photoSeekOffsetX"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="1000" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textColor="#AAAAAA"
+                android:textSize="11sp"
+                android:text="Offset Y (up ← → down)" />
+
+            <SeekBar
+                android:id="@+id/photoSeekOffsetY"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="1000" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textColor="#AAAAAA"
+                android:textSize="11sp"
+                android:text="Scale (zoom mouth overlay)" />
+
+            <SeekBar
+                android:id="@+id/photoSeekScale"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="1000" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textColor="#AAAAAA"
+                android:textSize="11sp"
+                android:text="Pivot X" />
+
+            <SeekBar
+                android:id="@+id/photoSeekPivotX"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="1000" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textColor="#AAAAAA"
+                android:textSize="11sp"
+                android:text="Pivot Y" />
+
+            <SeekBar
+                android:id="@+id/photoSeekPivotY"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:max="1000" />

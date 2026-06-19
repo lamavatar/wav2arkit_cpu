@@ -143,6 +143,10 @@ class SplatRenderer(
     private var uViewport = 0
     private var uTex = 0
     private var uPhotoTex = 0
+    private var uMouthTransformActive = 0
+    private var uMouthPivot = 0
+    private var uMouthOffset = 0
+    private var uMouthScale = 0
 
     private var surfW = 1
     private var surfH = 1
@@ -179,6 +183,10 @@ class SplatRenderer(
         quadProg = link(QUAD_VS, QUAD_FS)
         photoQuadProg = link(QUAD_VS, QUAD_PHOTO_FS)
         uViewport = GLES30.glGetUniformLocation(splatProg, "viewport")
+        uMouthTransformActive = GLES30.glGetUniformLocation(splatProg, "mouthTransformActive")
+        uMouthPivot = GLES30.glGetUniformLocation(splatProg, "mouthPivot")
+        uMouthOffset = GLES30.glGetUniformLocation(splatProg, "mouthOffset")
+        uMouthScale = GLES30.glGetUniformLocation(splatProg, "mouthScale")
         uTex = GLES30.glGetUniformLocation(quadProg, "tex")
         uPhotoTex = GLES30.glGetUniformLocation(photoQuadProg, "tex")
 
@@ -431,12 +439,7 @@ class SplatRenderer(
             }
         }
         if (instSize > 0) {
-            val sc = if (AppConfig.usesMouthScissor() && !MouthCropConfig.GUIDE_ENABLED) {
-                manualCropPixels()
-            } else {
-                null
-            }
-            drawSplats(instVbo, cached.instanceCount, sc)
+            drawSplats(instVbo, cached.instanceCount, photoOverlay = usePhotoBackground())
         }
     }
 
@@ -503,19 +506,26 @@ class SplatRenderer(
         GLES30.glBindFramebuffer(GLES30.GL_DRAW_FRAMEBUFFER, 0)
     }
 
-    private fun drawSplats(vbo: Int, count: Int, scissorTopLeft: IntArray? = null) {
+    private fun drawSplats(vbo: Int, count: Int, photoOverlay: Boolean = false) {
         if (count <= 0) return
-        if (scissorTopLeft != null) {
-            val x = ox + scissorTopLeft[0]
-            val yTop = scissorTopLeft[1]
-            val w = scissorTopLeft[2]
-            val h = scissorTopLeft[3]
-            val glY = surfH - oy - yTop - h
-            GLES30.glEnable(GLES30.GL_SCISSOR_TEST)
-            GLES30.glScissor(x, glY, w, h)
-        }
         GLES30.glUseProgram(splatProg)
         GLES30.glUniform2f(uViewport, sq.toFloat(), sq.toFloat())
+        if (photoOverlay) {
+            GLES30.glUniform1f(uMouthTransformActive, 1f)
+            GLES30.glUniform2f(
+                uMouthPivot,
+                MouthPhotoOverlayConfig.pivotXPx(sq),
+                MouthPhotoOverlayConfig.pivotYPx(sq),
+            )
+            GLES30.glUniform2f(
+                uMouthOffset,
+                MouthPhotoOverlayConfig.offsetXPx(sq),
+                MouthPhotoOverlayConfig.offsetYPx(sq),
+            )
+            GLES30.glUniform1f(uMouthScale, MouthPhotoOverlayConfig.SCALE)
+        } else {
+            GLES30.glUniform1f(uMouthTransformActive, 0f)
+        }
         GLES30.glEnable(GLES30.GL_BLEND)
         GLES30.glBlendFunc(GLES30.GL_ONE, GLES30.GL_ONE_MINUS_SRC_ALPHA)
 
@@ -535,9 +545,6 @@ class SplatRenderer(
         GLES30.glDrawArraysInstanced(GLES30.GL_TRIANGLES, 0, 6, count)
         GLES30.glBindVertexArray(0)
         GLES30.glDisable(GLES30.GL_BLEND)
-        if (scissorTopLeft != null) {
-            GLES30.glDisable(GLES30.GL_SCISSOR_TEST)
-        }
     }
 
     private fun bindInstanceAttr(loc: Int, size: Int, offset: Int) {
@@ -606,17 +613,30 @@ class SplatRenderer(
             layout(location=4) in vec3 i_color;
             layout(location=5) in float i_alpha;
             uniform vec2 viewport;
+            uniform float mouthTransformActive;
+            uniform vec2 mouthPivot;
+            uniform vec2 mouthOffset;
+            uniform float mouthScale;
             out vec2 v_d;
             out vec3 v_conic;
             out vec3 v_color;
             out float v_alpha;
             void main() {
-                vec2 off = corner * i_radius;
-                vec2 pix = i_center + off;
+                vec2 center = i_center;
+                float radius = i_radius;
+                vec3 conic = i_conic;
+                if (mouthTransformActive > 0.5) {
+                    center = (i_center - mouthPivot) * mouthScale + mouthPivot + mouthOffset;
+                    radius = i_radius * mouthScale;
+                    float invS2 = 1.0 / (mouthScale * mouthScale);
+                    conic = i_conic * invS2;
+                }
+                vec2 off = corner * radius;
+                vec2 pix = center + off;
                 vec2 ndc = vec2(pix.x / viewport.x * 2.0 - 1.0, 1.0 - pix.y / viewport.y * 2.0);
                 gl_Position = vec4(ndc, 0.0, 1.0);
                 v_d = off;
-                v_conic = i_conic;
+                v_conic = conic;
                 v_color = i_color;
                 v_alpha = i_alpha;
             }"""

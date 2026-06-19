@@ -139,14 +139,14 @@ object AppConfig {
 
     fun allowsHeadBone(): Boolean = RENDER_MODE.allowsHeadBone()
 
-    /** glScissor while compositing dynamic splats over a photo background. */
-    fun usesMouthScissor(): Boolean = PHOTO_COMPOSITE
-
     /** Render full frame to FBO, then blit only the mouth bbox to the screen. */
     fun usesFramebufferCrop(): Boolean = RENDER_MODE == RenderMode.MOUTH_CROP_ONLY
 
-    /** Manual crop rect applies in photo composite or framebuffer crop mode. */
-    fun usesManualMouthCrop(): Boolean = PHOTO_COMPOSITE || usesFramebufferCrop()
+    /** Manual crop rect sliders (crop-only mode). */
+    fun usesManualMouthCrop(): Boolean = usesFramebufferCrop()
+
+    /** Photo composite with transformable mouth overlay. */
+    fun usesPhotoMouthOverlay(): Boolean = PHOTO_COMPOSITE
 
 
 
