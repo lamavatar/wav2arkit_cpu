@@ -124,15 +124,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
     }
 
     private fun setupModeAndThreadControls() {
-        binding.mouthOnlySwitch.isChecked = AppConfig.MOUTH_ONLY
-        binding.mouthOnlySwitch.setOnCheckedChangeListener { _, checked ->
-            if (checked == AppConfig.MOUTH_ONLY) return@setOnCheckedChangeListener
-            AppConfig.MOUTH_ONLY = checked
-            renderer?.setMouthOnly(checked)
-            perfStats.reset()
-            rebuildPreview()
-            refreshStats(splatCount(pack))
-        }
+        setupRenderModeSpinner()
 
         binding.headBoneSwitch.isChecked = AppConfig.HEAD_BONE_ENABLED
         binding.headBoneSwitch.setOnCheckedChangeListener { _, checked ->
@@ -142,9 +134,9 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
                 Toast.makeText(this, "No head animation in .splat (re-bake with animation.glb)", Toast.LENGTH_LONG).show()
                 return@setOnCheckedChangeListener
             }
-            if (checked && AppConfig.PHOTO_COMPOSITE) {
+            if (checked && !AppConfig.allowsHeadBone()) {
                 binding.headBoneSwitch.isChecked = false
-                Toast.makeText(this, "Head bone is disabled in photo composite mode", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Head bone is not available in this render mode", Toast.LENGTH_SHORT).show()
                 return@setOnCheckedChangeListener
             }
             AppConfig.HEAD_BONE_ENABLED = checked
@@ -152,35 +144,6 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
             perfStats.reset()
             rebuildPreview()
             refreshStats(splatCount(pack))
-        }
-
-        binding.photoCompositeSwitch.isChecked = AppConfig.PHOTO_COMPOSITE
-        binding.photoCompositeSwitch.setOnCheckedChangeListener { _, checked ->
-            if (checked == AppConfig.PHOTO_COMPOSITE) return@setOnCheckedChangeListener
-            if (checked && !AppConfig.photoFile().isFile) {
-                binding.photoCompositeSwitch.isChecked = false
-                Toast.makeText(
-                    this,
-                    "Photo not found: ${AppConfig.photoPathHint()}",
-                    Toast.LENGTH_LONG,
-                ).show()
-                return@setOnCheckedChangeListener
-            }
-            AppConfig.PHOTO_COMPOSITE = checked
-            if (checked) {
-                AppConfig.HEAD_BONE_ENABLED = false
-                binding.headBoneSwitch.isChecked = false
-                syncHeadBoneToBuilders()
-            }
-            renderer?.setPhotoComposite(checked)
-            glView?.queueEvent {
-                if (checked) renderer?.reloadPhotoTexture()
-                runOnUiThread {
-                    perfStats.reset()
-                    rebuildPreview()
-                    refreshStats(splatCount(pack))
-                }
-            }
         }
 
         val options = AppConfig.THREAD_OPTIONS
@@ -205,6 +168,62 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
                     rebuildPreview()
                 }
                 refreshStats(splatCount(pack))
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+    }
+
+    private var renderModeSpinnerBusy = false
+
+    private fun setupRenderModeSpinner() {
+        val modes = RenderMode.entries
+        val adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_item,
+            modes.map { it.label },
+        )
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        binding.renderModeSpinner.adapter = adapter
+        val sel = modes.indexOf(AppConfig.RENDER_MODE).coerceAtLeast(0)
+        renderModeSpinnerBusy = true
+        binding.renderModeSpinner.setSelection(sel)
+        renderModeSpinnerBusy = false
+
+        binding.renderModeSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                if (renderModeSpinnerBusy) return
+                val mode = modes[position]
+                if (mode == AppConfig.RENDER_MODE) return
+
+                if (mode == RenderMode.MOUTH_ON_PHOTO && !AppConfig.photoFile().isFile) {
+                    renderModeSpinnerBusy = true
+                    binding.renderModeSpinner.setSelection(modes.indexOf(AppConfig.RENDER_MODE).coerceAtLeast(0))
+                    renderModeSpinnerBusy = false
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Photo not found: ${AppConfig.photoPathHint()}",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                    return
+                }
+
+                AppConfig.RENDER_MODE = mode
+                if (!mode.allowsHeadBone() && AppConfig.HEAD_BONE_ENABLED) {
+                    AppConfig.HEAD_BONE_ENABLED = false
+                    binding.headBoneSwitch.isChecked = false
+                    syncHeadBoneToBuilders()
+                }
+                renderer?.setRenderMode(mode)
+                updateHeadBoneSwitchState(pack)
+                glView?.queueEvent {
+                    if (mode == RenderMode.MOUTH_ON_PHOTO) renderer?.reloadPhotoTexture()
+                    runOnUiThread {
+                        perfStats.reset()
+                        rebuildPreview()
+                        refreshStats(splatCount(pack))
+                    }
+                }
             }
 
             override fun onNothingSelected(parent: AdapterView<*>?) {}
@@ -283,18 +302,18 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         prefetcher = pf
         syncHeadBoneToBuilders()
         updateHeadBoneSwitchState(p)
-        updatePhotoCompositeSwitchState()
+        updateRenderModeSpinnerState()
 
         val view = binding.glView
         view.setEGLContextClientVersion(3)
         val r = SplatRenderer(p, this, playback, frameCache, pf.builder, perfStats)
         renderer = r
-        r.setPhotoComposite(AppConfig.PHOTO_COMPOSITE)
+        r.setRenderMode(AppConfig.RENDER_MODE)
         view.setRenderer(r)
         view.renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
         glView = view
         view.queueEvent {
-            if (AppConfig.PHOTO_COMPOSITE) r.reloadPhotoTexture()
+            if (AppConfig.RENDER_MODE == RenderMode.MOUTH_ON_PHOTO) r.reloadPhotoTexture()
         }
         view.onResume()
 
@@ -318,19 +337,23 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
             binding.headBoneSwitch.isChecked = false
         }
         val busy = playback.state == PlaybackState.WARMING_UP || playback.state == PlaybackState.PLAYING
-        binding.headBoneSwitch.isEnabled = has && !busy && !AppConfig.PHOTO_COMPOSITE
-        binding.headBoneSwitch.alpha = if (has && !AppConfig.PHOTO_COMPOSITE) 1f else 0.45f
+        binding.headBoneSwitch.isEnabled = has && !busy && AppConfig.allowsHeadBone()
+        binding.headBoneSwitch.alpha = if (has && AppConfig.allowsHeadBone()) 1f else 0.45f
     }
 
-    private fun updatePhotoCompositeSwitchState() {
-        val has = AppConfig.photoFile().isFile
-        if (!has) {
-            AppConfig.PHOTO_COMPOSITE = false
-            binding.photoCompositeSwitch.isChecked = false
+    private fun updateRenderModeSpinnerState() {
+        val modes = RenderMode.entries
+        val hasPhoto = AppConfig.photoFile().isFile
+        if (!hasPhoto && AppConfig.RENDER_MODE == RenderMode.MOUTH_ON_PHOTO) {
+            AppConfig.RENDER_MODE = RenderMode.MOUTH_ON_STATIC
+            renderModeSpinnerBusy = true
+            binding.renderModeSpinner.setSelection(modes.indexOf(AppConfig.RENDER_MODE).coerceAtLeast(0))
+            renderModeSpinnerBusy = false
+            renderer?.setRenderMode(AppConfig.RENDER_MODE)
         }
         val busy = playback.state == PlaybackState.WARMING_UP || playback.state == PlaybackState.PLAYING
-        binding.photoCompositeSwitch.isEnabled = has && !busy
-        binding.photoCompositeSwitch.alpha = if (has) 1f else 0.45f
+        binding.renderModeSpinner.isEnabled = !busy
+        binding.renderModeSpinner.alpha = if (busy) 0.45f else 1f
     }
 
     /**
@@ -607,10 +630,8 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         }
         binding.playButton.isEnabled = busy || canStart
         binding.pickAudioButton.isEnabled = !busy && currentMode == AppConfig.AudioInputMode.FILE
-        binding.mouthOnlySwitch.isEnabled = !busy && !AppConfig.PHOTO_COMPOSITE
-        binding.photoCompositeSwitch.isEnabled = !busy && AppConfig.photoFile().isFile
-        binding.photoCompositeSwitch.alpha = if (AppConfig.photoFile().isFile) 1f else 0.45f
-        binding.headBoneSwitch.isEnabled = !busy && pack?.hasHeadAnimation == true && !AppConfig.PHOTO_COMPOSITE
+        updateRenderModeSpinnerState()
+        binding.headBoneSwitch.isEnabled = !busy && pack?.hasHeadAnimation == true && AppConfig.allowsHeadBone()
         binding.threadSpinner.isEnabled = !busy
     }
 
@@ -623,11 +644,11 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
 
     private fun refreshStats(splats: Int) {
         val p = pack
-        val mode = when {
-            AppConfig.PHOTO_COMPOSITE -> "Photo+mouth"
-            AppConfig.HEAD_BONE_ENABLED && p?.hasHeadAnimation == true -> "Head+${if (AppConfig.MOUTH_ONLY) "Mouth" else "Full"}"
-            AppConfig.MOUTH_ONLY -> "Mouth-only"
-            else -> "Full"
+        val modeLabel = AppConfig.RENDER_MODE.label
+        val mode = if (AppConfig.HEAD_BONE_ENABLED && p?.hasHeadAnimation == true && AppConfig.allowsHeadBone()) {
+            "$modeLabel+head"
+        } else {
+            modeLabel
         }
         val head = if (p?.hasHeadAnimation == true) " head:${p.headAnimName}" else ""
         val state = playback.state.name
