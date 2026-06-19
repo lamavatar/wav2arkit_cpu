@@ -24,6 +24,9 @@ class InstanceBuilder(private val pack: AvatarPack) {
     private val m = pack.numMorphs
     private val n3 = n * 3
 
+    /** When true and the pack has a HEAD trailer, apply baked head-bone matrices. */
+    @Volatile var headBoneEnabled: Boolean = false
+
     // Per-slot scratch (slot j == position in the index list being rendered).
     private val sSx = FloatArray(n)
     private val sSy = FloatArray(n)
@@ -59,7 +62,7 @@ class InstanceBuilder(private val pack: AvatarPack) {
      * of visible instances; data is in [instanceBytes]. CPU work is split over
      * [threads] worker tasks on [exec].
      */
-    fun build(weights: FloatArray, indices: IntArray, exec: ExecutorService, threads: Int): Int {
+    fun build(weights: FloatArray, indices: IntArray, exec: ExecutorService, threads: Int, frameIndex: Int = 0): Int {
         // Active morphs this frame (skip the zero-weight majority).
         var nz = 0
         val mi = IntArray(m)
@@ -70,9 +73,10 @@ class InstanceBuilder(private val pack: AvatarPack) {
         }
 
         val len = indices.size
+        val headMat = if (headBoneEnabled && pack.hasHeadAnimation) pack.headMatrixForFrame(frameIndex) else null
         val t = threads.coerceIn(1, 64)
         if (t == 1) {
-            processRange(0, len, indices, mi, mw, nz)
+            processRange(0, len, indices, mi, mw, nz, headMat)
         } else {
             val chunk = (len + t - 1) / t
             val tasks = ArrayList<Callable<Unit>>(t)
@@ -80,7 +84,7 @@ class InstanceBuilder(private val pack: AvatarPack) {
             while (start < len) {
                 val s = start
                 val e = minOf(start + chunk, len)
-                tasks.add(Callable { processRange(s, e, indices, mi, mw, nz); Unit })
+                tasks.add(Callable { processRange(s, e, indices, mi, mw, nz, headMat); Unit })
                 start = e
             }
             exec.invokeAll(tasks)
@@ -97,7 +101,7 @@ class InstanceBuilder(private val pack: AvatarPack) {
         exec: ExecutorService,
         threads: Int,
     ): CachedFrame {
-        val count = build(weights, indices, exec, threads)
+        val count = build(weights, indices, exec, threads, frameIndex)
         val size = count * 40
         val bytes = ByteArray(size)
         instanceBytes.position(0)
@@ -109,6 +113,7 @@ class InstanceBuilder(private val pack: AvatarPack) {
 
     private fun processRange(
         from: Int, to: Int, indices: IntArray, mi: IntArray, mw: FloatArray, nz: Int,
+        headMat: FloatArray?,
     ) {
         val r00 = r[0]; val r01 = r[1]; val r02 = r[2]
         val r10 = r[3]; val r11 = r[4]; val r12 = r[5]
@@ -134,6 +139,14 @@ class InstanceBuilder(private val pack: AvatarPack) {
                 py += w * deltas[off + 1]
                 pz += w * deltas[off + 2]
                 q++
+            }
+
+            // Rigid head-bone skinning after morphs (gaussian_splat.py positions()).
+            if (headMat != null) {
+                val nx = px * headMat[0] + py * headMat[4] + pz * headMat[8] + headMat[3]
+                val ny = px * headMat[1] + py * headMat[5] + pz * headMat[9] + headMat[7]
+                val nz = px * headMat[2] + py * headMat[6] + pz * headMat[10] + headMat[11]
+                px = nx; py = ny; pz = nz
             }
 
             // View transform t = R p + tv

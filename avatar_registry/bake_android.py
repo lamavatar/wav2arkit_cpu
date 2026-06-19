@@ -35,10 +35,19 @@ Layout SPL2 (geometry only — no F, no weights):
     opacity      : N   f32
     dynamic      : N   u8
     deltas       : M*N*3 f32
+    [optional head-bone clip — omitted when ``animation.glb`` is absent]
+    magic        : 4 bytes  b"HEAD"
+    H            : u32       number of baked head-matrix keyframes (one loop)
+    clip_dur     : f32       source clip duration in seconds
+    anim_name    : u8 len + len ascii bytes (clip name in animation.glb)
+    head_mats    : H*16 f32  row-major 4x4 per frame (matches gaussian_splat.py)
 
 Usage:
     # SPL2 (ONNX lip-sync, mouth morph subset) — no bsData.json required
     python -m avatar_registry.bake_android --format spl2 --morph-set mouth
+
+    # SPL2 with head-bone clip from animation.glb (first clip by default)
+    python -m avatar_registry.bake_android --format spl2 --morph-set full --animation yumi_h5_a3_speak
 
     # SPL1 (legacy baked animation)
     python -m avatar_registry.bake_android --format spl1
@@ -55,6 +64,7 @@ import numpy as np
 from avatar_registry.gaussian_splat import (
     ROOT,
     GaussianAvatar,
+    Skeleton,
     _load_bsdata,
     auto_camera,
 )
@@ -63,6 +73,7 @@ from postprocess import MOUTH_BLENDSHAPES
 
 MAGIC_SPL1 = b"SPL1"
 MAGIC_SPL2 = b"SPL2"
+MAGIC_HEAD = b"HEAD"
 DEFAULT_FPS = 30.0
 
 
@@ -147,6 +158,46 @@ def _synthetic_weight_sequence(morph_names: list[str]) -> np.ndarray:
     return seq
 
 
+def _bake_head_sequence(
+    avatar_dir: Path,
+    *,
+    animation: str = "",
+    fps: float = DEFAULT_FPS,
+) -> tuple[str, float, np.ndarray] | None:
+    """Sample one loop of head-bone skin matrices from ``animation.glb``.
+
+    Returns (clip_name, clip_duration_sec, matrices[H,4,4]) or None when the
+    file/clip is missing.
+    """
+    glb = avatar_dir / "animation.glb"
+    if not glb.is_file():
+        return None
+    skel = Skeleton(glb)
+    if not skel.anim_names:
+        return None
+    clip = animation or skel.anim_names[0]
+    anim_idx = skel.anim_index(clip)
+    clip_dur = float(skel.animations[anim_idx]["duration"])
+    if clip_dur <= 0.0:
+        clip_dur = 1.0
+    h = max(1, int(np.ceil(clip_dur * fps)))
+    mats = np.stack(
+        [skel.head_skin_matrix(anim_idx, min(i / fps, clip_dur)) for i in range(h)],
+        axis=0,
+    ).astype(np.float32)
+    return clip, clip_dur, mats
+
+
+def _write_head_trailer(f, clip: str, clip_dur: float, mats: np.ndarray) -> None:
+    h = mats.shape[0]
+    f.write(MAGIC_HEAD)
+    f.write(struct.pack("<If", h, float(clip_dur)))
+    name_b = clip.encode("ascii")
+    f.write(struct.pack("<B", len(name_b)))
+    f.write(name_b)
+    f.write(np.ascontiguousarray(mats.reshape(h, 16)).tobytes())
+
+
 def bake_spl2(
     avatar_dir: str | Path,
     out_path: str | Path,
@@ -154,6 +205,7 @@ def bake_spl2(
     morph_set: str = "mouth",
     dyn_threshold: float = 0.02,
     fps: float = DEFAULT_FPS,
+    animation: str = "",
 ) -> None:
     avatar = GaussianAvatar(avatar_dir)
     morph_names = _morph_candidates(avatar, morph_set)
@@ -172,6 +224,7 @@ def bake_spl2(
 
     eye, center, up, fovy = auto_camera(base)
     cam = np.array([*eye, *center, *up, fovy], np.float32)
+    head = _bake_head_sequence(Path(avatar_dir), animation=animation, fps=fps)
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -190,11 +243,19 @@ def bake_spl2(
         f.write(np.ascontiguousarray(opacity).tobytes())
         f.write(np.ascontiguousarray(dyn).tobytes())
         f.write(np.ascontiguousarray(deltas).tobytes())
+        if head is not None:
+            clip, clip_dur, mats = head
+            _write_head_trailer(f, clip, clip_dur, mats)
 
     size_mb = out_path.stat().st_size / 1e6
     print(f"baked {out_path} (SPL2)")
     print(f"  gaussians={N}  morphs={M}  frames=0  fps={fps:g}  dynamic={int(dyn.sum())}")
     print(f"  morph_set={morph_set}  morphs: {', '.join(morph_names)}")
+    if head is not None:
+        clip, clip_dur, mats = head
+        print(f"  head_bone: {clip}  keyframes={mats.shape[0]}  clip_dur={clip_dur:g}s")
+    else:
+        print("  head_bone: (none — no animation.glb or empty clip list)")
     print(f"  size={size_mb:.1f} MB")
 
 
@@ -207,11 +268,30 @@ def main() -> int:
     p.add_argument("--morph-set", choices=["mouth", "full"], default="mouth",
                    help="SPL2 only: which ARKit morph subset to bake")
     p.add_argument("--dyn-threshold", type=float, default=0.02)
+    p.add_argument(
+        "--animation", default="",
+        help="SPL2: head-bone clip in animation.glb (default: first clip when present)",
+    )
+    p.add_argument(
+        "--list-animations", action="store_true",
+        help="print animation.glb clip names for --avatar and exit",
+    )
     args = p.parse_args()
+    if args.list_animations:
+        glb = Path(args.avatar) / "animation.glb"
+        if not glb.is_file():
+            raise SystemExit(f"animation.glb not found: {glb}")
+        print("animations:", Skeleton(glb).anim_names)
+        return 0
     if args.format == "spl1":
         bake_spl1(args.avatar, args.output, dyn_threshold=args.dyn_threshold)
     else:
-        bake_spl2(args.avatar, args.output, morph_set=args.morph_set, dyn_threshold=args.dyn_threshold)
+        bake_spl2(
+            args.avatar, args.output,
+            morph_set=args.morph_set,
+            dyn_threshold=args.dyn_threshold,
+            animation=args.animation,
+        )
     return 0
 
 

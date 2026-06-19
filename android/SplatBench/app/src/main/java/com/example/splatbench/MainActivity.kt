@@ -134,6 +134,21 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
             refreshStats(splatCount(pack))
         }
 
+        binding.headBoneSwitch.isChecked = AppConfig.HEAD_BONE_ENABLED
+        binding.headBoneSwitch.setOnCheckedChangeListener { _, checked ->
+            if (checked == AppConfig.HEAD_BONE_ENABLED) return@setOnCheckedChangeListener
+            if (checked && pack?.hasHeadAnimation != true) {
+                binding.headBoneSwitch.isChecked = false
+                Toast.makeText(this, "No head animation in .splat (re-bake with animation.glb)", Toast.LENGTH_LONG).show()
+                return@setOnCheckedChangeListener
+            }
+            AppConfig.HEAD_BONE_ENABLED = checked
+            syncHeadBoneToBuilders()
+            perfStats.reset()
+            rebuildPreview()
+            refreshStats(splatCount(pack))
+        }
+
         val options = AppConfig.THREAD_OPTIONS
         val adapter = ArrayAdapter(
             this,
@@ -232,11 +247,14 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
             perfStats = perfStats,
         )
         prefetcher = pf
+        syncHeadBoneToBuilders()
+        updateHeadBoneSwitchState(p)
 
         val view = binding.glView
         view.setEGLContextClientVersion(3)
         val r = SplatRenderer(p, this, playback, frameCache, pf.builder, perfStats)
         renderer = r
+        syncHeadBoneToBuilders()
         view.setRenderer(r)
         view.renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
         glView = view
@@ -247,6 +265,23 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         refreshStats(splats = splatCount(p))
         maybeRebuildIdlePreview()
         updateControls()
+    }
+
+    private fun syncHeadBoneToBuilders() {
+        val enabled = AppConfig.HEAD_BONE_ENABLED
+        prefetcher?.builder?.headBoneEnabled = enabled
+        renderer?.setHeadBoneEnabled(enabled)
+    }
+
+    private fun updateHeadBoneSwitchState(p: AvatarPack?) {
+        val has = p?.hasHeadAnimation == true
+        if (!has) {
+            AppConfig.HEAD_BONE_ENABLED = false
+            binding.headBoneSwitch.isChecked = false
+        }
+        val busy = playback.state == PlaybackState.WARMING_UP || playback.state == PlaybackState.PLAYING
+        binding.headBoneSwitch.isEnabled = has && !busy
+        binding.headBoneSwitch.alpha = if (has) 1f else 0.45f
     }
 
     /**
@@ -262,7 +297,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
 
         if (frameCache.has(0)) {
             glView?.queueEvent {
-                if (AppConfig.MOUTH_ONLY) renderer?.ensureStaticBase()
+                if (AppConfig.useCompositeMouthOnly(pack ?: return@queueEvent)) renderer?.ensureStaticBase()
                 runOnUiThread { glView?.requestRender() }
             }
             return
@@ -279,7 +314,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
 
     private fun rebuildPreview() {
         val pf = prefetcher ?: return
-        val mouthOnly = AppConfig.MOUTH_ONLY
+        val mouthOnly = AppConfig.useCompositeMouthOnly(pack ?: return)
         pf.cancel()
         frameCache.clear()
         pf.resetCancel()
@@ -302,7 +337,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
                 val cached = frameCache.get(0)
                 refreshStats(cached?.instanceCount ?: splatCount(pack))
                 glView?.queueEvent {
-                    if (AppConfig.MOUTH_ONLY) renderer?.ensureStaticBase()
+                    if (AppConfig.useCompositeMouthOnly(pack ?: return@queueEvent)) renderer?.ensureStaticBase()
                     runOnUiThread { glView?.requestRender() }
                 }
             }
@@ -330,7 +365,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
             return
         }
 
-        val mouthOnly = AppConfig.MOUTH_ONLY
+        val mouthOnly = AppConfig.useCompositeMouthOnly(pk)
         perfStats.reset()
         session.reset()
         playback.prebufferSeconds = AppConfig.PREBUFFER_SECONDS
@@ -525,6 +560,8 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         binding.playButton.isEnabled = busy || canStart
         binding.pickAudioButton.isEnabled = !busy && currentMode == AppConfig.AudioInputMode.FILE
         binding.mouthOnlySwitch.isEnabled = !busy
+        binding.headBoneSwitch.isEnabled = !busy && pack?.hasHeadAnimation == true
+        binding.headBoneSwitch.alpha = if (pack?.hasHeadAnimation == true) 1f else 0.45f
         binding.threadSpinner.isEnabled = !busy
     }
 
@@ -536,10 +573,16 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
     }
 
     private fun refreshStats(splats: Int) {
-        val mode = if (AppConfig.MOUTH_ONLY) "Mouth-only" else "Full"
+        val p = pack
+        val mode = when {
+            AppConfig.HEAD_BONE_ENABLED && p?.hasHeadAnimation == true -> "Head+${if (AppConfig.MOUTH_ONLY) "Mouth" else "Full"}"
+            AppConfig.MOUTH_ONLY -> "Mouth-only"
+            else -> "Full"
+        }
+        val head = if (p?.hasHeadAnimation == true) " head:${p.headAnimName}" else ""
         val state = playback.state.name
         binding.statLine1.text =
-            "$mode | $state | threads=${AppConfig.BUILD_THREADS} | splats=$splats"
+            "$mode | $state | threads=${AppConfig.BUILD_THREADS} | splats=$splats$head"
         binding.statLine2.text = String.format(
             "infer: %.1f ms | post: %.1f ms",
             pipeline?.lastInferMs ?: 0.0,
@@ -566,7 +609,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
 
     private fun splatCount(p: AvatarPack?): Int {
         if (p == null) return 0
-        return if (AppConfig.MOUTH_ONLY) p.dynamicIndices.size else p.numGaussians
+        return if (AppConfig.useCompositeMouthOnly(p)) p.dynamicIndices.size else p.numGaussians
     }
 
     override fun onResume() {

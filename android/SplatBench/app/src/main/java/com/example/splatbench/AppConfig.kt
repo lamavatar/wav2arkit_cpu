@@ -85,6 +85,12 @@ object AppConfig {
 
     @Volatile var MOUTH_ONLY = true
 
+    /** Apply baked head-bone matrices from the SPL2 HEAD trailer (runtime toggle). */
+    @Volatile var HEAD_BONE_ENABLED = false
+
+    fun useCompositeMouthOnly(pack: AvatarPack): Boolean =
+        MOUTH_ONLY && !(HEAD_BONE_ENABLED && pack.hasHeadAnimation)
+
 
 
     /** Geometry lead kept ahead of the audio clock during PLAYING (seconds). */
