@@ -8,16 +8,16 @@ package com.example.splatbench
 object MouthCropConfig {
 
   /** Left edge (0 = left, 1 = right). */
-  @Volatile var X = 0.32f
+  @Volatile var X = 0.439f
 
   /** Top edge (0 = top, 1 = bottom). */
-  @Volatile var Y = 0.52f
+  @Volatile var Y = 0.560f
 
   /** Width as fraction of viewport side. */
-  @Volatile var W = 0.36f
+  @Volatile var W = 0.131f
 
   /** Height as fraction of viewport side. */
-  @Volatile var H = 0.28f
+  @Volatile var H = 0.072f
 
   /**
    * When true: show full frame + guide overlay so the crop rect can be aligned.
