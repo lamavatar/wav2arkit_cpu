@@ -263,7 +263,9 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         binding.pickAudioButton.isEnabled = currentMode == AppConfig.AudioInputMode.FILE
         playback.state = PlaybackState.IDLE
         refreshStats(splats = splatCount(p))
-        rebuildPreview()
+        // Preview is triggered by onSurfaceReady() once the GL surface/camera are
+        // set up; building here could project with the placeholder viewport.
+        if (renderer?.surfaceReady == true) rebuildPreview()
         updateControls()
     }
 
@@ -279,12 +281,22 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         val mouthOnly = AppConfig.MOUTH_ONLY
         pf.cancel()
         frameCache.clear()
+        renderer?.clearLastGoodCached()
         pf.resetCancel()
         glView?.queueEvent {
             renderer?.syncPrefetchView()
             if (mouthOnly) renderer?.ensureStaticBase()
             runOnUiThread {
                 pf.buildPreviewFrame(0, mouthOnly, previewListener)
+            }
+        }
+    }
+
+    override fun onSurfaceReady() {
+        runOnUiThread {
+            val state = playback.state
+            if (state == PlaybackState.IDLE || state == PlaybackState.READY) {
+                rebuildPreview()
             }
         }
     }
