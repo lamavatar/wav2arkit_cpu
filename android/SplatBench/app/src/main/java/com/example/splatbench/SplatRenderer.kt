@@ -165,6 +165,10 @@ class SplatRenderer(
     private var liveExec: ExecutorService = Executors.newFixedThreadPool(AppConfig.MAX_BUILD_THREADS)
     private val bgR = 0.063f; private val bgG = 0.063f; private val bgB = 0.078f
 
+    /** Transparent clear for [sceneFbo] so uncropped areas don't composite as opaque black. */
+    private val sceneClearR = 0f; private val sceneClearG = 0f
+    private val sceneClearB = 0f; private val sceneClearA = 0f
+
     private val uploadScratch: ByteBuffer =
         ByteBuffer.allocateDirect(pack.numGaussians * 10 * 4).order(ByteOrder.nativeOrder())
 
@@ -474,7 +478,7 @@ class SplatRenderer(
     private fun renderFullSceneToFbo(instanceCount: Int) {
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, sceneFbo)
         GLES30.glViewport(0, 0, sq, sq)
-        GLES30.glClearColor(bgR, bgG, bgB, 1f)
+        GLES30.glClearColor(sceneClearR, sceneClearG, sceneClearB, sceneClearA)
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
         if (instanceCount > 0) {
             drawSplats(instVbo, instanceCount)
