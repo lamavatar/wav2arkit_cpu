@@ -141,12 +141,13 @@ class InstanceBuilder(private val pack: AvatarPack) {
                 q++
             }
 
-            // Rigid head-bone skinning after morphs (gaussian_splat.py positions()).
+            // Pivot rotation only (no translation — avoids whole-face pan/zoom).
             if (headMat != null) {
-                val nx = px * headMat[0] + py * headMat[4] + pz * headMat[8] + headMat[3]
-                val ny = px * headMat[1] + py * headMat[5] + pz * headMat[9] + headMat[7]
-                val nz = px * headMat[2] + py * headMat[6] + pz * headMat[10] + headMat[11]
-                px = nx; py = ny; pz = nz
+                val pivot = pack.headPivot
+                if (pivot != null && pivot.size >= 3) {
+                    val p = HeadBone.applyPivotRotation(px, py, pz, pivot, headMat)
+                    px = p[0]; py = p[1]; pz = p[2]
+                }
             }
 
             // View transform t = R p + tv
