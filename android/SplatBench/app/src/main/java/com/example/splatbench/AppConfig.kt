@@ -97,6 +97,15 @@ object AppConfig {
 
     const val PREBUFFER_SECONDS = 1.0f
 
+    /** [FrameCache] sliding window: frames to keep behind the playhead. */
+    const val FRAME_CACHE_BEHIND = 2
+
+    /** Extra frames beyond the prebuffer lead to retain when trimming. */
+    const val FRAME_CACHE_AHEAD_MARGIN = 8
+
+    /** Hard cap on cached geometry frames (full mode ~800 KB/frame). */
+    const val FRAME_CACHE_MAX_FRAMES = 48
+
     /** Frames built before audio playback starts (0.5s @ 30fps). */
 
     const val GEOMETRY_START_FRAMES = 15

@@ -128,6 +128,8 @@ class FramePrefetcher(
                         nextBuildIndex.set(idx)
                     }
 
+                    trimPlaybackCache(playbackFrame, lead)
+
                     val dur = clipDurationMs(src)
                     if (dur > 0 && frameCount > 0 &&
                         playbackFrame >= frameCount - 1 &&
@@ -195,6 +197,11 @@ class FramePrefetcher(
     }
 
     private fun buildFrame(frameIndex: Int, mouthOnly: Boolean, indices: IntArray? = null) {
+        if (cache.size() >= AppConfig.FRAME_CACHE_MAX_FRAMES - 1) {
+            val src = source()
+            val lead = controller.frameCountForSeconds(controller.prebufferSeconds, src.fps)
+            trimPlaybackCache(controller.currentFrameIndex(pack), lead)
+        }
         val idx = indices ?: renderIndices(mouthOnly)
         val weights = source().weightsForFrame(frameIndex)
         val t0 = System.nanoTime()
@@ -202,5 +209,13 @@ class FramePrefetcher(
         val buildMs = (System.nanoTime() - t0) / 1_000_000.0
         perfStats?.addBuild(buildMs)
         cache.put(cached.copy(buildMs = buildMs))
+    }
+
+    /** Keep only a sliding window around the playhead (full mode frames are ~800 KB). */
+    private fun trimPlaybackCache(playbackFrame: Int, leadFrames: Int) {
+        val minKeep = (playbackFrame - AppConfig.FRAME_CACHE_BEHIND).coerceAtLeast(0)
+        val maxKeep = playbackFrame + leadFrames + AppConfig.FRAME_CACHE_AHEAD_MARGIN
+        cache.evictOutside(minKeep, maxKeep)
+        cache.trimToMaxFrames(AppConfig.FRAME_CACHE_MAX_FRAMES)
     }
 }
