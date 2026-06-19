@@ -34,6 +34,13 @@ class Wav2ArkitOnnx private constructor(
 ) {
     private val inputName: String = session.inputNames.iterator().next()
 
+    /** Native C++ post-processing context handle (0 if the .so is unavailable). */
+    private val nativeHandle: Long =
+        if (NativePostprocess.available) NativePostprocess.nativeCreate() else 0L
+
+    /** True when the native post-processing pipeline is active. */
+    val usesNativePostprocess: Boolean get() = nativeHandle != 0L
+
     /** Most recent ORT forward (session.run) duration, ms. */
     @Volatile var lastInferMs: Double = 0.0
         private set
@@ -81,11 +88,44 @@ class Wav2ArkitOnnx private constructor(
 
         // 5) post-process with cross-chunk context (post-processing time)
         val tPost = System.nanoTime()
-        val result = postprocessChunk(newSlice, ctx, maxContextFrames)
+        val result = if (nativeHandle != 0L) {
+            nativePostprocess(newSlice, pcmU8, ctx)
+        } else {
+            postprocessChunk(newSlice, ctx, maxContextFrames)
+        }
         lastPostprocessMs = (System.nanoTime() - tPost) / 1_000_000.0
 
         ctx.isInitial = false
         return result
+    }
+
+    /**
+     * C++ (.so) post-processing mirroring [session.py] `_postprocess_chunk`. The
+     * native context owns the previous expression/volume tails (36 frames).
+     */
+    private fun nativePostprocess(
+        newSlice: Array<FloatArray>,
+        pcmU8: ByteArray,
+        ctx: StreamingContext,
+    ): Array<FloatArray> {
+        val k = newSlice.size
+        if (k == 0) return newSlice
+        if (ctx.isInitial) NativePostprocess.nativeReset(nativeHandle)
+
+        val channels = newSlice[0].size
+        val flat = FloatArray(k * channels)
+        for (i in 0 until k) {
+            System.arraycopy(newSlice[i], 0, flat, i * channels, channels)
+        }
+        val chunkAudioF = AudioPcmConverter.u8ToOnnxFloat(pcmU8)
+        val out = NativePostprocess.nativeProcessChunk(nativeHandle, flat, k, chunkAudioF)
+        if (out.size != k * channels) {
+            // Native failure: fall back to deterministic Kotlin path.
+            return postprocessChunk(newSlice, ctx, MAX_CONTEXT_FRAMES)
+        }
+        return Array(k) { i ->
+            FloatArray(channels) { c -> out[i * channels + c] }
+        }
     }
 
     private fun buildOverlapInput(
@@ -147,6 +187,9 @@ class Wav2ArkitOnnx private constructor(
 
     fun close() {
         try { session.close() } catch (_: Throwable) {}
+        if (nativeHandle != 0L) {
+            try { NativePostprocess.nativeDestroy(nativeHandle) } catch (_: Throwable) {}
+        }
     }
 
     companion object {

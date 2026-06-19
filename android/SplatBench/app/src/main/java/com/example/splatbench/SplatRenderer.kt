@@ -25,6 +25,13 @@ class SplatRenderer(
     interface Callbacks {
         /** Called once per drawn frame (GL thread) with the visible splat count. */
         fun onStatsTick(splats: Int)
+
+        /**
+         * Called on the GL thread after the surface size, camera and base FBO are
+         * ready (i.e. [onSurfaceChanged] completed). Preview builds must wait for
+         * this, otherwise they project with the placeholder 1x1 viewport.
+         */
+        fun onSurfaceReady()
     }
 
     @Volatile var mouthOnly = AppConfig.MOUTH_ONLY
@@ -33,6 +40,15 @@ class SplatRenderer(
     /** Switch mouth-only/full at runtime (call when not playing, then rebuild preview). */
     fun setMouthOnly(enabled: Boolean) {
         mouthOnly = enabled
+        lastGoodCached = null
+    }
+
+    /** True once [onSurfaceChanged] has set up the real viewport/camera/FBO. */
+    @Volatile var surfaceReady = false
+        private set
+
+    /** Drop the last-shown frame so a stale geometry build is never re-displayed. */
+    fun clearLastGoodCached() {
         lastGoodCached = null
     }
 
@@ -109,6 +125,9 @@ class SplatRenderer(
         setupCamera()
         setupBaseFbo()
         baseReady = false
+        lastGoodCached = null
+        surfaceReady = true
+        callbacks.onSurfaceReady()
     }
 
     private fun setupCamera() {
