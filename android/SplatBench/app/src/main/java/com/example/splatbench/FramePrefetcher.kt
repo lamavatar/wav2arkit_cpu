@@ -35,11 +35,18 @@ class FramePrefetcher(
     private val nextBuildIndex = AtomicInteger(0)
     private var leadThread: Thread? = null
 
+    // Preview builds run one-at-a-time here; [previewGen] discards stale results
+    // so an older (e.g. wrong-viewport) build can never overwrite a newer one.
+    private val previewExec: ExecutorService = Executors.newSingleThreadExecutor()
+    private val previewGen = AtomicInteger(0)
+
     fun cancel() {
         cancelled.set(true)
         leadRunning.set(false)
         leadThread?.interrupt()
         leadThread = null
+        // Invalidate any queued/running preview build so it won't publish.
+        previewGen.incrementAndGet()
     }
 
     fun resetCancel() {
@@ -52,14 +59,23 @@ class FramePrefetcher(
     }
 
     fun buildPreviewFrame(frameIndex: Int, mouthOnly: Boolean, listener: Listener?) {
-        Thread({
+        val gen = previewGen.incrementAndGet()
+        previewExec.execute {
             try {
-                if (cancelled.get()) return@Thread
-                buildFrame(frameIndex, mouthOnly)
+                // A newer preview request was queued after us — skip this one.
+                if (gen != previewGen.get()) return@execute
+                val idx = renderIndices(mouthOnly)
+                val weights = source().weightsForFrame(frameIndex)
+                val t0 = System.nanoTime()
+                val cached = builder.buildCached(frameIndex, weights, idx, exec, threadCount)
+                val buildMs = (System.nanoTime() - t0) / 1_000_000.0
+                perfStats?.addBuild(buildMs)
+                // Only publish if still the latest request (avoids stale overwrite).
+                if (gen == previewGen.get()) cache.put(cached.copy(buildMs = buildMs))
             } catch (e: Exception) {
                 listener?.onError(e.message ?: "preview build failed")
             }
-        }, "prefetch-preview").start()
+        }
     }
 
     fun startPrebuffer(mouthOnly: Boolean, listener: Listener) {
@@ -165,6 +181,7 @@ class FramePrefetcher(
     fun shutdown() {
         cancel()
         exec.shutdownNow()
+        previewExec.shutdownNow()
     }
 
     private fun clipDurationMs(src: ExpressionSource): Int {
