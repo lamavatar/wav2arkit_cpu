@@ -267,7 +267,6 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
             if (mouthOnly) renderer?.ensureStaticBase()
             runOnUiThread {
                 pf.buildNeutralPreview(mouthOnly, previewListener)
-                glView?.requestRender()
             }
         }
     }
@@ -282,6 +281,14 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
     }
 
     private val previewListener = object : FramePrefetcher.Listener {
+        override fun onWarmupComplete() {
+            runOnUiThread {
+                val cached = frameCache.get(0)
+                refreshStats(cached?.instanceCount ?: splatCount(pack))
+                glView?.requestRender()
+            }
+        }
+
         override fun onError(message: String) {
             runOnUiThread { Toast.makeText(this@MainActivity, message, Toast.LENGTH_SHORT).show() }
         }
