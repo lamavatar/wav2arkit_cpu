@@ -131,7 +131,7 @@ object AppConfig {
 
     /** Build/render only the dynamic (mouth) Gaussian subset. */
     fun useMouthOnlyIndices(pack: AvatarPack): Boolean =
-        PHOTO_COMPOSITE || RENDER_MODE == RenderMode.MOUTH_CROP_ONLY || useCompositeMouthOnly(pack)
+        PHOTO_COMPOSITE || useCompositeMouthOnly(pack)
 
     /** Pre-render static Gaussians into the base FBO (not used in photo / crop-only). */
     fun needsStaticGaussianBase(pack: AvatarPack): Boolean =
@@ -139,9 +139,11 @@ object AppConfig {
 
     fun allowsHeadBone(): Boolean = RENDER_MODE.allowsHeadBone()
 
-    /** Scissor crop around the mouth bbox (photo overlay or mouth-crop-only). */
-    fun usesMouthScissor(): Boolean =
-        PHOTO_COMPOSITE || RENDER_MODE == RenderMode.MOUTH_CROP_ONLY
+    /** glScissor while compositing dynamic splats over a photo background. */
+    fun usesMouthScissor(): Boolean = PHOTO_COMPOSITE
+
+    /** Render full frame to FBO, then blit only the mouth bbox to the screen. */
+    fun usesFramebufferCrop(): Boolean = RENDER_MODE == RenderMode.MOUTH_CROP_ONLY
 
 
 

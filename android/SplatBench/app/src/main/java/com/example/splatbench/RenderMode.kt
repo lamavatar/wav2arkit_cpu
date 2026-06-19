@@ -11,7 +11,7 @@ enum class RenderMode(val label: String) {
     /** ③ Dynamic mouth splats on [AppConfig.PHOTO_FILE_NAME]. */
     MOUTH_ON_PHOTO("Mouth on photo"),
 
-    /** ① Dynamic mouth splats only (no photo / static base). */
+    /** ① Full avatar rendered offscreen, then mouth bbox blitted to screen. */
     MOUTH_CROP_ONLY("Mouth crop only"),
     ;
 

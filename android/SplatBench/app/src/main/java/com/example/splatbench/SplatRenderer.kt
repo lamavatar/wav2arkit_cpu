@@ -112,7 +112,7 @@ class SplatRenderer(
     private fun updateMouthScissor() {
         mouthScissor = null
         mouthCropRatios = null
-        if (!AppConfig.usesMouthScissor()) return
+        if (!AppConfig.PHOTO_COMPOSITE && !AppConfig.usesFramebufferCrop()) return
         if (AppConfig.PHOTO_COMPOSITE && !photoReady) return
         if (sq <= 0) return
 
@@ -151,6 +151,8 @@ class SplatRenderer(
     private var quadVao = 0
     private var baseFbo = 0
     private var baseTex = 0
+    private var sceneFbo = 0
+    private var sceneTex = 0
     private var photoTex = 0
     private var photoReady = false
     private var mouthScissor: IntArray? = null
@@ -225,6 +227,7 @@ class SplatRenderer(
         oy = 0
         setupCamera()
         setupBaseFbo()
+        setupSceneFbo()
         baseReady = false
         if (photoComposite) reloadPhotoTexture()
         updateMouthScissor()
@@ -300,6 +303,26 @@ class SplatRenderer(
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, baseFbo)
         GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0,
             GLES30.GL_TEXTURE_2D, baseTex, 0)
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+    }
+
+    private fun setupSceneFbo() {
+        if (sceneFbo != 0) {
+            GLES30.glDeleteFramebuffers(1, intArrayOf(sceneFbo), 0)
+            GLES30.glDeleteTextures(1, intArrayOf(sceneTex), 0)
+        }
+        val tex = IntArray(1); GLES30.glGenTextures(1, tex, 0); sceneTex = tex[0]
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, sceneTex)
+        GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA8, sq, sq, 0,
+            GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, null)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_CLAMP_TO_EDGE)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE)
+        val fbo = IntArray(1); GLES30.glGenFramebuffers(1, fbo, 0); sceneFbo = fbo[0]
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, sceneFbo)
+        GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0,
+            GLES30.GL_TEXTURE_2D, sceneTex, 0)
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
     }
 
@@ -409,6 +432,10 @@ class SplatRenderer(
     }
 
     private fun drawScene(cached: CachedFrame, instSize: Int) {
+        if (AppConfig.usesFramebufferCrop()) {
+            drawSceneFramebufferCrop(cached, instSize)
+            return
+        }
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
         GLES30.glViewport(0, 0, surfW, surfH)
         GLES30.glClearColor(bgR, bgG, bgB, 1f)
@@ -425,6 +452,46 @@ class SplatRenderer(
             val sc = if (AppConfig.usesMouthScissor()) mouthScissor else null
             drawSplats(instVbo, cached.instanceCount, sc)
         }
+    }
+
+    /**
+     * Crop-only mode: render the complete avatar into [sceneFbo], then blit the mouth
+     * bbox from that finished frame (no glScissor during splat draw — avoids black holes).
+     */
+    private fun drawSceneFramebufferCrop(cached: CachedFrame, instSize: Int) {
+        updateMouthScissor()
+        val crop = mouthScissor
+
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, sceneFbo)
+        GLES30.glViewport(0, 0, sq, sq)
+        GLES30.glClearColor(bgR, bgG, bgB, 1f)
+        GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
+        if (instSize > 0) {
+            drawSplats(instVbo, cached.instanceCount)
+        }
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+
+        GLES30.glViewport(0, 0, surfW, surfH)
+        GLES30.glClearColor(bgR, bgG, bgB, 1f)
+        GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
+
+        if (crop == null) return
+
+        val sx = crop[0]
+        val syTop = crop[1]
+        val sw = crop[2]
+        val sh = crop[3]
+        val srcY = sq - syTop - sh
+
+        GLES30.glBindFramebuffer(GLES30.GL_READ_FRAMEBUFFER, sceneFbo)
+        GLES30.glBindFramebuffer(GLES30.GL_DRAW_FRAMEBUFFER, 0)
+        GLES30.glBlitFramebuffer(
+            sx, srcY, sx + sw, srcY + sh,
+            ox, oy, ox + sq, oy + sq,
+            GLES30.GL_COLOR_BUFFER_BIT, GLES30.GL_LINEAR,
+        )
+        GLES30.glBindFramebuffer(GLES30.GL_READ_FRAMEBUFFER, 0)
+        GLES30.glBindFramebuffer(GLES30.GL_DRAW_FRAMEBUFFER, 0)
     }
 
     private fun drawSplats(vbo: Int, count: Int, scissorTopLeft: IntArray? = null) {
