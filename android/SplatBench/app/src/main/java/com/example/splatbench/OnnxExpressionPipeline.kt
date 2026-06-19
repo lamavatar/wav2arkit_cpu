@@ -4,15 +4,15 @@ import android.util.Log
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Consumes the shared [AudioRingBuffer] (u8) on a dedicated inference thread,
- * runs [Wav2ArkitOnnx] per chunk and appends results to an [ExpressionBuffer].
- * There is no FILE/MIC branching here — the only difference between sources is
- * the producer that fills the ring and the playback clock.
+ * Polls the shared [AudioBuffer] every [AppConfig.POLL_MS]. When at least
+ * [AppConfig.chunkBytes] are available, runs ONNX inference + postprocess and
+ * appends blendshapes to [ExpressionBuffer].
  */
 class OnnxExpressionPipeline(
     private val onnx: Wav2ArkitOnnx,
-    private val ring: AudioRingBuffer,
+    private val buffer: AudioBuffer,
     val expressionBuffer: ExpressionBuffer,
+    private val session: PlaybackSession,
 ) {
     private val running = AtomicBoolean(false)
     private var thread: Thread? = null
@@ -40,21 +40,32 @@ class OnnxExpressionPipeline(
 
     private fun loop() {
         val chunkBytes = AppConfig.chunkBytes
-        while (running.get()) {
-            val chunk = ring.readChunk(chunkBytes)
+        while (running.get() && !session.isStopRequested()) {
+            val tickStart = System.nanoTime()
+            val chunk = buffer.readChunk(chunkBytes)
             if (chunk != null) {
                 process(chunk)
-                continue
-            }
-            if (ring.isEndOfStream()) {
-                val rem = ring.availableBytes()
-                if (rem > 0) {
-                    ring.readChunk(rem)?.let { process(it) }
-                }
+            } else if (buffer.isEndOfStream()) {
+                finishTail(chunkBytes)
                 break
             }
-            try { Thread.sleep(4) } catch (_: InterruptedException) { break }
+            sleepUntil(tickStart + AppConfig.POLL_MS * 1_000_000L)
         }
+    }
+
+    private fun finishTail(chunkBytes: Int) {
+        val rem = buffer.readRemaining()
+        if (rem == null || rem.isEmpty()) return
+        val chunk = if (rem.size < chunkBytes) {
+            ByteArray(chunkBytes).also { out ->
+                System.arraycopy(rem, 0, out, 0, rem.size)
+                val pad = AppConfig.AUDIO_SILENCE_U8.toByte()
+                for (i in rem.size until chunkBytes) out[i] = pad
+            }
+        } else {
+            rem
+        }
+        process(chunk)
     }
 
     private fun process(chunkU8: ByteArray) {
@@ -64,11 +75,26 @@ class OnnxExpressionPipeline(
 
     fun stop() {
         running.set(false)
+        session.requestStop()
         thread?.interrupt()
         thread = null
     }
 
+    fun resetContext() {
+        context.reset()
+    }
+
     fun isRunning(): Boolean = running.get()
+
+    private fun sleepUntil(deadlineNs: Long) {
+        val rem = deadlineNs - System.nanoTime()
+        if (rem > 0) {
+            try {
+                Thread.sleep(rem / 1_000_000L, (rem % 1_000_000L).toInt())
+            } catch (_: InterruptedException) {
+            }
+        }
+    }
 
     companion object {
         private const val TAG = "OnnxExpressionPipeline"
@@ -76,12 +102,7 @@ class OnnxExpressionPipeline(
 }
 
 /**
- * [ExpressionSource] backed by streaming ONNX inference. Weights are mapped
- * from the 52-entry ARKit vector onto the pack's baked morphs via
- * [AvatarPack.mapArkitWeights].
- *
- * @param frameCountProvider upper bound on selectable frames: a fixed
- *   duration-derived total for FILE, or a growing value for MIC.
+ * [ExpressionSource] backed by streaming ONNX inference.
  */
 class OnnxExpressionSource(
     private val pack: AvatarPack,

@@ -11,10 +11,9 @@ import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Streams an audio file (URI) into the shared ring buffer the same way the mic
- * does: decode → mono → 16kHz resample → u8 → [AudioRingBuffer.write]. The full
- * file is never held in memory; the producer stays ahead of inference/playback
- * and signals [AudioRingBuffer.markEndOfStream] at EOF.
+ * Decodes a file URI into 16kHz mono u8 PCM. Every [AppConfig.POLL_MS] writes
+ * [AppConfig.fileTickBytes] (500ms) into the shared [AudioBuffer], then waits
+ * 200ms before the next tick (2.5× realtime fill rate).
  */
 class FileAudioProducer(
     private val context: Context,
@@ -23,18 +22,19 @@ class FileAudioProducer(
 
     private val running = AtomicBoolean(false)
     private var thread: Thread? = null
+    private var session: PlaybackSession? = null
 
     override fun isRunning(): Boolean = running.get()
 
-    override fun start(ring: AudioRingBuffer) {
+    override fun start(buffer: AudioBuffer, session: PlaybackSession) {
         if (!running.compareAndSet(false, true)) return
+        this.session = session
         val t = Thread({
             try {
-                decodeLoop(ring)
+                tickLoop(buffer, session)
             } catch (e: Exception) {
                 Log.w(TAG, "decode failed: ${e.message}")
             } finally {
-                ring.markEndOfStream()
                 running.set(false)
             }
         }, "audio-decode-file")
@@ -44,49 +44,126 @@ class FileAudioProducer(
 
     override fun stop() {
         running.set(false)
+        session?.requestStop()
         thread?.interrupt()
         thread = null
     }
 
-    private fun decodeLoop(ring: AudioRingBuffer) {
-        val extractor = MediaExtractor()
-        extractor.setDataSource(context, uri, null)
-        val trackIndex = selectAudioTrack(extractor)
-        require(trackIndex >= 0) { "no audio track" }
-        extractor.selectTrack(trackIndex)
-        val format = extractor.getTrackFormat(trackIndex)
-        val mime = format.getString(MediaFormat.KEY_MIME) ?: error("no mime")
-        val srcSr = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
-        val srcCh = if (format.containsKey(MediaFormat.KEY_CHANNEL_COUNT))
-            format.getInteger(MediaFormat.KEY_CHANNEL_COUNT) else 1
-
-        val codec = MediaCodec.createDecoderByType(mime)
-        codec.configure(format, null, null, 0)
-        codec.start()
-
-        val resampler = LinearResampler(srcSr, AppConfig.AUDIO_SR)
-        val bufInfo = MediaCodec.BufferInfo()
-        var sawInputEos = false
-        var sawOutputEos = false
-        val timeoutUs = 10_000L
-
-        // Reusable u8 output staging.
-        var u8 = ByteArray(8192)
-
-        while (running.get() && !sawOutputEos) {
-            if (!sawInputEos) {
-                val inIdx = codec.dequeueInputBuffer(timeoutUs)
-                if (inIdx >= 0) {
-                    val inBuf = codec.getInputBuffer(inIdx)!!
-                    val sampleSize = extractor.readSampleData(inBuf, 0)
-                    if (sampleSize < 0) {
-                        codec.queueInputBuffer(inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                        sawInputEos = true
-                    } else {
-                        codec.queueInputBuffer(inIdx, 0, sampleSize, extractor.sampleTime, 0)
-                        extractor.advance()
-                    }
+    private fun tickLoop(buffer: AudioBuffer, session: PlaybackSession) {
+        val decoder = FilePcmDecoder(context, uri)
+        decoder.open()
+        try {
+            val tickBytes = AppConfig.fileTickBytes
+            val pollTickBytes = AppConfig.pollTickBytes
+            val scratch = ByteArray(tickBytes)
+            while (running.get() && !session.isStopRequested()) {
+                val tickStart = System.nanoTime()
+                val n = decoder.readU8(scratch, tickBytes)
+                if (n > 0) {
+                    buffer.writeBlocking(scratch, n) { running.get() && !session.isStopRequested() }
                 }
+                if (decoder.isEof()) {
+                    val pad = AppConfig.chunkBytes - (buffer.availableBytes() % AppConfig.chunkBytes)
+                    if (pad in 1 until AppConfig.chunkBytes) {
+                        buffer.writeSilence(pad)
+                    }
+                    buffer.writeSilence(pollTickBytes)
+                    buffer.markEndOfStream()
+                    break
+                }
+                sleepUntil(tickStart + AppConfig.POLL_MS * 1_000_000L)
+            }
+        } finally {
+            decoder.close()
+        }
+    }
+
+    private fun sleepUntil(deadlineNs: Long) {
+        val rem = deadlineNs - System.nanoTime()
+        if (rem > 0) {
+            try {
+                Thread.sleep(rem / 1_000_000L, (rem % 1_000_000L).toInt())
+            } catch (_: InterruptedException) {
+            }
+        }
+    }
+
+    /** Incremental MediaCodec decoder that yields fixed-size u8 blocks. */
+    private class FilePcmDecoder(
+        private val context: Context,
+        private val uri: Uri,
+    ) {
+        private var extractor: MediaExtractor? = null
+        private var codec: MediaCodec? = null
+        private var resampler: LinearResampler? = null
+        private val staging = ArrayList<Byte>(8192)
+        private var eof = false
+
+        fun open() {
+            val extractor = MediaExtractor()
+            extractor.setDataSource(context, uri, null)
+            val trackIndex = selectAudioTrack(extractor)
+            require(trackIndex >= 0) { "no audio track" }
+            extractor.selectTrack(trackIndex)
+            val format = extractor.getTrackFormat(trackIndex)
+            val mime = format.getString(MediaFormat.KEY_MIME) ?: error("no mime")
+            val srcSr = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+            val srcCh = if (format.containsKey(MediaFormat.KEY_CHANNEL_COUNT))
+                format.getInteger(MediaFormat.KEY_CHANNEL_COUNT) else 1
+
+            val codec = MediaCodec.createDecoderByType(mime)
+            codec.configure(format, null, null, 0)
+            codec.start()
+
+            this.extractor = extractor
+            this.codec = codec
+            this.resampler = LinearResampler(srcSr, AppConfig.AUDIO_SR)
+        }
+
+        fun isEof(): Boolean = eof && staging.isEmpty()
+
+        /**
+         * Fill [out] with up to [maxBytes] u8 samples. Returns bytes written
+         * (may be less than max at EOF).
+         */
+        fun readU8(out: ByteArray, maxBytes: Int): Int {
+            while (staging.size < maxBytes && !eof) {
+                if (!pumpCodec()) eof = true
+            }
+            val n = minOf(maxBytes, staging.size)
+            for (i in 0 until n) out[i] = staging[i]
+            repeat(n) { staging.removeAt(0) }
+            return n
+        }
+
+        fun close() {
+            try { codec?.stop() } catch (_: Exception) {}
+            codec?.release()
+            extractor?.release()
+            codec = null
+            extractor = null
+            staging.clear()
+        }
+
+        private fun pumpCodec(): Boolean {
+            val extractor = extractor ?: return false
+            val codec = codec ?: return false
+            val resampler = resampler ?: return false
+            val bufInfo = MediaCodec.BufferInfo()
+            val timeoutUs = 10_000L
+            var progressed = false
+
+            val inIdx = codec.dequeueInputBuffer(timeoutUs)
+            if (inIdx >= 0) {
+                val inBuf = codec.getInputBuffer(inIdx)!!
+                val sampleSize = extractor.readSampleData(inBuf, 0)
+                if (sampleSize < 0) {
+                    codec.queueInputBuffer(inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                } else {
+                    codec.queueInputBuffer(inIdx, 0, sampleSize, extractor.sampleTime, 0)
+                    extractor.advance()
+                }
+                progressed = true
             }
 
             val outIdx = codec.dequeueOutputBuffer(bufInfo, timeoutUs)
@@ -95,114 +172,95 @@ class FileAudioProducer(
                     val outBuf = codec.getOutputBuffer(outIdx)!!
                     outBuf.position(bufInfo.offset)
                     outBuf.limit(bufInfo.offset + bufInfo.size)
-                    val mono16 = downmixToMono16(outBuf, srcCh)
+                    val mono16 = downmixToMono16(outBuf, channelCount(extractor))
                     val res = resampler.process(mono16)
-                    if (res.isNotEmpty()) {
-                        if (u8.size < res.size) u8 = ByteArray(res.size)
-                        for (i in res.indices) u8[i] = AudioPcmConverter.i16ToU8(res[i])
-                        writeThrottled(ring, u8, res.size)
-                    }
+                    for (s in res) staging.add(AudioPcmConverter.i16ToU8(s))
                 }
                 codec.releaseOutputBuffer(outIdx, false)
                 if (bufInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
-                    sawOutputEos = true
+                    eof = true
+                }
+                progressed = true
+            }
+            return progressed
+        }
+
+        private fun channelCount(extractor: MediaExtractor): Int {
+            for (i in 0 until extractor.trackCount) {
+                val fmt = extractor.getTrackFormat(i)
+                if (fmt.getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true) {
+                    return if (fmt.containsKey(MediaFormat.KEY_CHANNEL_COUNT))
+                        fmt.getInteger(MediaFormat.KEY_CHANNEL_COUNT) else 1
                 }
             }
+            return 1
         }
 
-        try { codec.stop() } catch (_: Exception) {}
-        codec.release()
-        extractor.release()
-    }
-
-    /**
-     * Keep the producer ahead of the consumer without overrunning the 10s ring:
-     * if the ring is nearly full, wait for the inference thread to drain it.
-     */
-    private fun writeThrottled(ring: AudioRingBuffer, u8: ByteArray, len: Int) {
-        var offset = 0
-        while (offset < len && running.get()) {
-            val free = ring.capacityBytes - ring.availableBytes()
-            if (free <= 0) {
-                try { Thread.sleep(5) } catch (_: InterruptedException) { return }
-                continue
+        private fun selectAudioTrack(extractor: MediaExtractor): Int {
+            for (i in 0 until extractor.trackCount) {
+                val mime = extractor.getTrackFormat(i).getString(MediaFormat.KEY_MIME) ?: continue
+                if (mime.startsWith("audio/")) return i
             }
-            val n = minOf(free, len - offset)
-            val block = if (offset == 0 && n == len) u8 else u8.copyOfRange(offset, offset + n)
-            ring.write(block, n)
-            offset += n
+            return -1
         }
-    }
 
-    private fun selectAudioTrack(extractor: MediaExtractor): Int {
-        for (i in 0 until extractor.trackCount) {
-            val mime = extractor.getTrackFormat(i).getString(MediaFormat.KEY_MIME) ?: continue
-            if (mime.startsWith("audio/")) return i
-        }
-        return -1
-    }
-
-    /** Interleaved 16-bit PCM → mono 16-bit (average channels). */
-    private fun downmixToMono16(buf: ByteBuffer, channels: Int): ShortArray {
-        val sb = buf.order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
-        val total = sb.remaining()
-        if (channels <= 1) {
-            val out = ShortArray(total)
-            sb.get(out)
+        private fun downmixToMono16(buf: ByteBuffer, channels: Int): ShortArray {
+            val sb = buf.order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+            val total = sb.remaining()
+            if (channels <= 1) {
+                val out = ShortArray(total)
+                sb.get(out)
+                return out
+            }
+            val frames = total / channels
+            val out = ShortArray(frames)
+            val tmp = ShortArray(total)
+            sb.get(tmp)
+            var si = 0
+            for (f in 0 until frames) {
+                var acc = 0
+                for (c in 0 until channels) acc += tmp[si++].toInt()
+                out[f] = (acc / channels).toShort()
+            }
             return out
         }
-        val frames = total / channels
-        val out = ShortArray(frames)
-        val tmp = ShortArray(total)
-        sb.get(tmp)
-        var si = 0
-        for (f in 0 until frames) {
-            var acc = 0
-            for (c in 0 until channels) acc += tmp[si++].toInt()
-            out[f] = (acc / channels).toShort()
-        }
-        return out
-    }
 
-    /** Stateful linear resampler (keeps fractional phase + last sample across blocks). */
-    private class LinearResampler(private val srcSr: Int, private val dstSr: Int) {
-        private val ratio = srcSr.toDouble() / dstSr.toDouble()
-        private var pos = 0.0
-        private var last: Short = 0
-        private var primed = false
+        private class LinearResampler(private val srcSr: Int, private val dstSr: Int) {
+            private val ratio = srcSr.toDouble() / dstSr.toDouble()
+            private var pos = 0.0
+            private var last: Short = 0
+            private var primed = false
 
-        fun process(input: ShortArray): ShortArray {
-            if (input.isEmpty()) return ShortArray(0)
-            if (srcSr == dstSr) return input
+            fun process(input: ShortArray): ShortArray {
+                if (input.isEmpty()) return ShortArray(0)
+                if (srcSr == dstSr) return input
 
-            // Prepend the previous block's last sample so interpolation is
-            // continuous across block boundaries.
-            val ext: ShortArray
-            if (primed) {
-                ext = ShortArray(input.size + 1)
-                ext[0] = last
-                System.arraycopy(input, 0, ext, 1, input.size)
-            } else {
-                ext = input
+                val ext: ShortArray
+                if (primed) {
+                    ext = ShortArray(input.size + 1)
+                    ext[0] = last
+                    System.arraycopy(input, 0, ext, 1, input.size)
+                } else {
+                    ext = input
+                }
+
+                val out = ArrayList<Short>((input.size / ratio).toInt() + 2)
+                while (true) {
+                    val i = pos.toInt()
+                    if (i + 1 >= ext.size) break
+                    val frac = pos - i
+                    val s0 = ext[i].toDouble()
+                    val s1 = ext[i + 1].toDouble()
+                    val v = s0 + (s1 - s0) * frac
+                    out.add(v.toInt().coerceIn(-32768, 32767).toShort())
+                    pos += ratio
+                }
+                pos -= (ext.size - 1)
+                if (pos < 0.0) pos = 0.0
+                last = input[input.size - 1]
+                primed = true
+                return out.toShortArray()
             }
-
-            val out = ArrayList<Short>((input.size / ratio).toInt() + 2)
-            while (true) {
-                val i = pos.toInt()
-                if (i + 1 >= ext.size) break
-                val frac = pos - i
-                val s0 = ext[i].toDouble()
-                val s1 = ext[i + 1].toDouble()
-                val v = s0 + (s1 - s0) * frac
-                out.add(v.toInt().coerceIn(-32768, 32767).toShort())
-                pos += ratio
-            }
-            // Carry phase relative to next block's prepended last sample (ext[0]).
-            pos -= (ext.size - 1)
-            if (pos < 0.0) pos = 0.0
-            last = input[input.size - 1]
-            primed = true
-            return out.toShortArray()
         }
     }
 

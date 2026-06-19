@@ -5,7 +5,8 @@ import java.util.concurrent.atomic.AtomicReference
 enum class PlaybackState {
     IDLE,
     READY,
-    PREBUFFERING,
+    /** Waiting for first inference + geometry warmup frames. */
+    WARMING_UP,
     PLAYING,
     DONE,
 }

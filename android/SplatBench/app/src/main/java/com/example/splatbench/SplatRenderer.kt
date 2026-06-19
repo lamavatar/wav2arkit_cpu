@@ -2,6 +2,7 @@ package com.example.splatbench
 
 import android.opengl.GLES30
 import android.opengl.GLSurfaceView
+import android.os.SystemClock
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.ExecutorService
@@ -23,34 +24,31 @@ class SplatRenderer(
 ) : GLSurfaceView.Renderer {
 
     interface Callbacks {
-        /** Called once per drawn frame (GL thread) with the visible splat count. */
         fun onStatsTick(splats: Int)
 
-        /**
-         * Called on the GL thread after the surface size, camera and base FBO are
-         * ready (i.e. [onSurfaceChanged] completed). Preview builds must wait for
-         * this, otherwise they project with the placeholder 1x1 viewport.
-         */
+        /** Refresh [PlaybackController.audioPositionMs] from the audio master clock. */
+        fun onUpdateAudioClock()
+
         fun onSurfaceReady()
+
+        /** Schedule the next 30fps draw ([deadlineUptimeMs] = uptime millis). */
+        fun scheduleNextFrame(deadlineUptimeMs: Long)
     }
 
     @Volatile var mouthOnly = AppConfig.MOUTH_ONLY
         private set
 
-    /** Switch mouth-only/full at runtime (call when not playing, then rebuild preview). */
-    fun setMouthOnly(enabled: Boolean) {
-        mouthOnly = enabled
-        lastGoodCached = null
-    }
-
-    /** True once [onSurfaceChanged] has set up the real viewport/camera/FBO. */
-    @Volatile var surfaceReady = false
+    @Volatile var fixedFpsEnabled = false
         private set
 
-    /** Drop the last-shown frame so a stale geometry build is never re-displayed. */
-    fun clearLastGoodCached() {
-        lastGoodCached = null
+    private var nextFrameUptimeMs = 0L
+
+    fun setMouthOnly(enabled: Boolean) {
+        mouthOnly = enabled
     }
+
+    @Volatile var surfaceReady = false
+        private set
 
     private val buildThreads: Int
         get() = AppConfig.BUILD_THREADS.coerceIn(1, AppConfig.MAX_BUILD_THREADS)
@@ -85,9 +83,18 @@ class SplatRenderer(
     private var liveExec: ExecutorService = Executors.newFixedThreadPool(AppConfig.MAX_BUILD_THREADS)
     private val bgR = 0.063f; private val bgG = 0.063f; private val bgB = 0.078f
 
-    @Volatile private var lastGoodCached: CachedFrame? = null
     private val uploadScratch: ByteBuffer =
         ByteBuffer.allocateDirect(pack.numGaussians * 10 * 4).order(ByteOrder.nativeOrder())
+
+    fun startFixedFps() {
+        fixedFpsEnabled = true
+        nextFrameUptimeMs = 0L
+    }
+
+    fun stopFixedFps() {
+        fixedFpsEnabled = false
+        nextFrameUptimeMs = 0L
+    }
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         splatProg = link(SPLAT_VS, SPLAT_FS)
@@ -125,7 +132,6 @@ class SplatRenderer(
         setupCamera()
         setupBaseFbo()
         baseReady = false
-        lastGoodCached = null
         surfaceReady = true
         callbacks.onSurfaceReady()
     }
@@ -226,52 +232,69 @@ class SplatRenderer(
         builder.build(weights, indices, liveExec, buildThreads)
 
     override fun onDrawFrame(gl: GL10?) {
-        if (mouthOnly) ensureBase()
-
+        val frameStartUptime = SystemClock.uptimeMillis()
         val state = playback.state
+        val lipSyncActive = state == PlaybackState.PLAYING
+
+        if (lipSyncActive) {
+            callbacks.onUpdateAudioClock()
+        }
+
         val frameIdx = when (state) {
-            PlaybackState.PLAYING, PlaybackState.DONE -> playback.currentFrameIndex(pack)
+            PlaybackState.PLAYING -> playback.currentFrameIndex(pack)
+            PlaybackState.DONE -> playback.currentFrameIndex(pack)
             else -> 0
         }
 
-        var cached = frameCache.get(frameIdx)
-        if (cached == null) cached = lastGoodCached
-        if (cached != null) lastGoodCached = cached
+        val cached = when {
+            lipSyncActive -> frameCache.get(frameIdx)
+            state == PlaybackState.DONE -> frameCache.get(frameIdx) ?: frameCache.get(0)
+            else -> frameCache.get(0)
+        }
+        if (cached != null && mouthOnly) ensureBase()
 
-        // Geometry phase: prepare/upload the per-frame instance buffer to the GPU.
         val tGeom = System.nanoTime()
         val instSize = if (cached != null) uploadInstance(cached) else 0
         perfStats?.addGeom((System.nanoTime() - tGeom) / 1_000_000.0)
 
-        // Draw phase: rasterize to the screen (glFinish to capture GPU work).
         val tDraw = System.nanoTime()
         if (cached != null) {
             drawScene(cached, mouthOnly, instSize)
         } else {
-            renderClear(mouthOnly)
+            renderBackgroundOnly()
         }
         GLES30.glFinish()
         perfStats?.addDraw((System.nanoTime() - tDraw) / 1_000_000.0)
 
-        val splats = cached?.instanceCount ?: if (mouthOnly && baseReady) staticCount else defaultSplatCount()
-        callbacks.onStatsTick(splats)
+        callbacks.onStatsTick(cached?.instanceCount ?: 0)
+
+        if (fixedFpsEnabled && lipSyncActive) {
+            scheduleNextFrameFromStart(frameStartUptime)
+        }
     }
 
-    private fun defaultSplatCount(): Int =
-        if (mouthOnly) pack.dynamicIndices.size else pack.numGaussians
+    /** Next frame deadline = previous deadline + 1/30s (not after draw completes). */
+    private fun scheduleNextFrameFromStart(frameStartUptimeMs: Long) {
+        val periodMs = AppConfig.framePeriodNs / 1_000_000L
+        if (nextFrameUptimeMs == 0L) {
+            nextFrameUptimeMs = frameStartUptimeMs + periodMs
+        } else {
+            nextFrameUptimeMs += periodMs
+        }
+        val now = SystemClock.uptimeMillis()
+        if (nextFrameUptimeMs < now) {
+            nextFrameUptimeMs = now
+        }
+        callbacks.scheduleNextFrame(nextFrameUptimeMs)
+    }
 
-    private fun renderClear(mouthOnly: Boolean) {
+    private fun renderBackgroundOnly() {
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
         GLES30.glViewport(0, 0, surfW, surfH)
         GLES30.glClearColor(bgR, bgG, bgB, 1f)
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
-        if (mouthOnly && baseReady) {
-            GLES30.glViewport(ox, oy, sq, sq)
-            drawQuad(baseTex)
-        }
     }
 
-    /** Upload the cached instance bytes into the GPU buffer; returns byte size. */
     private fun uploadInstance(cached: CachedFrame): Int {
         val size = cached.instanceCount * 40
         if (size > 0) {

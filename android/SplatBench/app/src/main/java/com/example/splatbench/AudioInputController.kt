@@ -5,41 +5,37 @@ import android.media.MediaMetadataRetriever
 import android.net.Uri
 
 /**
- * Owns the shared [AudioRingBuffer] and swaps the active [AudioProducer]
- * (file vs mic) without changing the downstream inference/render path. Also
- * provides the mic capture clock; the file clock is driven by MediaPlayer in
- * the activity.
+ * Owns the shared [AudioBuffer] and swaps the active [AudioProducer]
+ * (file vs mic) without changing the downstream inference/render path.
  */
 class AudioInputController(private val context: Context) {
 
-    val ring = AudioRingBuffer()
+    val buffer = AudioBuffer()
 
     @Volatile var activeSource: ActiveAudioSource = ActiveAudioSource.NONE
         private set
 
     private var producer: AudioProducer? = null
-    private var micStartNanos: Long = 0L
 
-    /** Start streaming the file into the ring. Returns clip duration in ms. */
-    fun startFile(uri: Uri): Int {
+    /** Start streaming the file into the buffer. Returns clip duration in ms. */
+    fun startFile(uri: Uri, session: PlaybackSession): Int {
         stop()
-        ring.reset()
+        buffer.reset()
         val p = FileAudioProducer(context, uri)
         producer = p
-        p.start(ring)
+        p.start(buffer, session)
         activeSource = ActiveAudioSource.FILE
         return durationMs(uri)
     }
 
-    /** Start mic capture into the ring (requires ENABLE_MIC_INPUT + permission). */
-    fun startMic() {
+    /** Start mic capture into the buffer (requires ENABLE_MIC_INPUT + permission). */
+    fun startMic(session: PlaybackSession) {
         check(AppConfig.ENABLE_MIC_INPUT) { "mic input disabled" }
         stop()
-        ring.reset()
+        buffer.reset()
         val p = MicAudioProducer()
         producer = p
-        p.start(ring)
-        micStartNanos = System.nanoTime()
+        p.start(buffer, session)
         activeSource = ActiveAudioSource.MIC
     }
 
@@ -49,11 +45,7 @@ class AudioInputController(private val context: Context) {
         activeSource = ActiveAudioSource.NONE
     }
 
-    fun micPositionMs(): Int =
-        ((System.nanoTime() - micStartNanos) / 1_000_000L).toInt().coerceAtLeast(0)
-
-    /** Bytes currently buffered, expressed as seconds (for the ring stat line). */
-    fun ringSeconds(): Float = ring.availableBytes().toFloat() / AppConfig.AUDIO_SR
+    fun bufferSeconds(): Float = buffer.availableBytes().toFloat() / AppConfig.AUDIO_SR
 
     private fun durationMs(uri: Uri): Int {
         val mmr = MediaMetadataRetriever()

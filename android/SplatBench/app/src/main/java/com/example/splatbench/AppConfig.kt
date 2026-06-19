@@ -87,9 +87,17 @@ object AppConfig {
 
 
 
-    /** Seconds of frames to pre-build before audio starts (and as lead during playback). */
+    /** Geometry lead kept ahead of the audio clock during PLAYING (seconds). */
 
     const val PREBUFFER_SECONDS = 1.0f
+
+    /** Frames built before audio playback starts (0.5s @ 30fps). */
+
+    const val GEOMETRY_START_FRAMES = 15
+
+    /** Pause between successive geometry builds (ms). */
+
+    const val GEOMETRY_BUILD_PAUSE_MS = 8L
 
 
 
@@ -103,11 +111,19 @@ object AppConfig {
 
     const val EXPRESSION_FPS = 30.0f        // wav2arkit output fps
 
+    const val RENDER_FPS = 30
 
 
-    // --- Ring buffer / chunking (configurable here) ----------------------- //
 
-    const val RING_BUFFER_SECONDS = 10.0f   // default 10s ring; change here
+    // --- Audio buffer / polling / chunking -------------------------------- //
+
+    const val AUDIO_BUFFER_SECONDS = 20.0f  // fixed linear buffer (no overwrite)
+
+    const val POLL_MS = 200L                // producer + inference poll interval
+
+    const val FILE_TICK_MS = 500L           // file producer: bytes per tick
+
+    const val MIC_TICK_MS = 200L            // mic producer: bytes per tick
 
     const val CHUNK_SECONDS = 1.0f          // ONNX chunk consumed per infer
 
@@ -115,11 +131,21 @@ object AppConfig {
 
 
 
-    /** Ring capacity in bytes (u8 → 1 byte/sample). */
+    val audioBufferCapacityBytes: Int
 
-    val ringBufferCapacityBytes: Int
+        get() = (AUDIO_BUFFER_SECONDS * AUDIO_SR).toInt()
 
-        get() = (RING_BUFFER_SECONDS * AUDIO_SR).toInt()
+    val fileTickBytes: Int
+
+        get() = (FILE_TICK_MS * AUDIO_SR / 1000L).toInt()
+
+    val micTickBytes: Int
+
+        get() = (MIC_TICK_MS * AUDIO_SR / 1000L).toInt()
+
+    val pollTickBytes: Int
+
+        get() = (POLL_MS * AUDIO_SR / 1000L).toInt()
 
     val chunkBytes: Int
 
@@ -128,6 +154,10 @@ object AppConfig {
     val overlapBytes: Int
 
         get() = (OVERLAP_MS * AUDIO_SR / 1000f).toInt()
+
+    val framePeriodNs: Long
+
+        get() = 1_000_000_000L / RENDER_FPS
 
 
 
