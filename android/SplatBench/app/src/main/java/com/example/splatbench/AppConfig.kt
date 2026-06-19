@@ -131,7 +131,7 @@ object AppConfig {
 
     /** Build/render only the dynamic (mouth) Gaussian subset. */
     fun useMouthOnlyIndices(pack: AvatarPack): Boolean =
-        useCompositeMouthOnly(pack)
+        useCompositeMouthOnly(pack) || PHOTO_COMPOSITE
 
     /** Pre-render static Gaussians into the base FBO (not used in photo / crop-only). */
     fun needsStaticGaussianBase(pack: AvatarPack): Boolean =

@@ -128,7 +128,7 @@ class SplatRenderer(
     private var splatProg = 0
     private var quadProg = 0
     private var photoQuadProg = 0
-    private var mouthPatchProg = 0
+    private var mouthAlphaProg = 0
     private var vao = 0
     private var cornerVbo = 0
     private var instVbo = 0
@@ -146,7 +146,9 @@ class SplatRenderer(
     private var uViewport = 0
     private var uTex = 0
     private var uPhotoTex = 0
-    private var uPatchTex = 0
+    private var uAlphaTex = 0
+    private var uAlphaCutoff = 0
+    private var uAlphaFeather = 0
 
     private var surfW = 1
     private var surfH = 1
@@ -186,11 +188,13 @@ class SplatRenderer(
         splatProg = link(SPLAT_VS, SPLAT_FS)
         quadProg = link(QUAD_VS, QUAD_FS)
         photoQuadProg = link(QUAD_VS, QUAD_PHOTO_FS)
-        mouthPatchProg = link(MOUTH_PATCH_VS, MOUTH_PATCH_FS)
+        mouthAlphaProg = link(MOUTH_PATCH_VS, MOUTH_ALPHA_FS)
         uViewport = GLES30.glGetUniformLocation(splatProg, "viewport")
         uTex = GLES30.glGetUniformLocation(quadProg, "tex")
         uPhotoTex = GLES30.glGetUniformLocation(photoQuadProg, "tex")
-        uPatchTex = GLES30.glGetUniformLocation(mouthPatchProg, "tex")
+        uAlphaTex = GLES30.glGetUniformLocation(mouthAlphaProg, "tex")
+        uAlphaCutoff = GLES30.glGetUniformLocation(mouthAlphaProg, "alphaCutoff")
+        uAlphaFeather = GLES30.glGetUniformLocation(mouthAlphaProg, "alphaFeather")
 
         val ids = IntArray(5)
         GLES30.glGenBuffers(5, ids, 0)
@@ -468,8 +472,8 @@ class SplatRenderer(
     }
 
     /**
-     * Photo composite: full avatar → crop [MouthCropConfig] from FBO → overlay patch on photo
-     * with [MouthPhotoOverlayConfig] transform (no sparse splats on photo).
+     * Photo composite: mouth splats → transparent [sceneFbo] → alpha-mask overlay on photo
+     * with [MouthPhotoOverlayConfig] transform.
      */
     private fun drawScenePhotoComposite(cached: CachedFrame, instSize: Int) {
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
@@ -483,8 +487,7 @@ class SplatRenderer(
 
         renderFullSceneToFbo(cached.instanceCount)
         GLES30.glViewport(ox, oy, sq, sq)
-        val crop = mouthCropPixels() ?: return
-        drawMouthPatchComposite(crop)
+        drawMouthAlphaComposite()
     }
 
     private fun renderFullSceneToFbo(instanceCount: Int) {
@@ -512,21 +515,13 @@ class SplatRenderer(
     private fun sqPxToNdc(px: Float, py: Float): Pair<Float, Float> =
         (px / sq * 2f - 1f) to (1f - py / sq * 2f)
 
-    /** Draw cropped mouth patch from [sceneTex] with photo overlay transform. */
-    private fun drawMouthPatchComposite(crop: IntArray) {
-        val cx = crop[0].toFloat()
-        val cy = crop[1].toFloat()
-        val cw = crop[2].toFloat()
-        val ch = crop[3].toFloat()
-        val u0 = cx / sq
-        val u1 = (cx + cw) / sq
-        val v0 = 1f - (cy + ch) / sq
-        val v1 = 1f - cy / sq
-
-        val tl = transformPatchPoint(cx, cy)
-        val tr = transformPatchPoint(cx + cw, cy)
-        val br = transformPatchPoint(cx + cw, cy + ch)
-        val bl = transformPatchPoint(cx, cy + ch)
+    /** Alpha-mask composite of full [sceneTex] over photo (mouth-on-photo only). */
+    private fun drawMouthAlphaComposite() {
+        val s = sq.toFloat()
+        val tl = transformPatchPoint(0f, 0f)
+        val tr = transformPatchPoint(s, 0f)
+        val br = transformPatchPoint(s, s)
+        val bl = transformPatchPoint(0f, s)
 
         fun vtx(px: Float, py: Float, u: Float, v: Float): FloatArray {
             val (nx, ny) = sqPxToNdc(px, py)
@@ -534,12 +529,12 @@ class SplatRenderer(
         }
 
         val data = floatArrayOf(
-            *vtx(tl.first, tl.second, u0, v1),
-            *vtx(tr.first, tr.second, u1, v1),
-            *vtx(bl.first, bl.second, u0, v0),
-            *vtx(tr.first, tr.second, u1, v1),
-            *vtx(br.first, br.second, u1, v0),
-            *vtx(bl.first, bl.second, u0, v0),
+            *vtx(tl.first, tl.second, 0f, 1f),
+            *vtx(tr.first, tr.second, 1f, 1f),
+            *vtx(bl.first, bl.second, 0f, 0f),
+            *vtx(tr.first, tr.second, 1f, 1f),
+            *vtx(br.first, br.second, 1f, 0f),
+            *vtx(bl.first, bl.second, 0f, 0f),
         )
         val bb = ByteBuffer.allocateDirect(data.size * 4).order(ByteOrder.nativeOrder())
         bb.asFloatBuffer().put(data)
@@ -547,10 +542,12 @@ class SplatRenderer(
         GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, mouthPatchVbo)
         GLES30.glBufferData(GLES30.GL_ARRAY_BUFFER, data.size * 4, bb, GLES30.GL_DYNAMIC_DRAW)
 
-        GLES30.glUseProgram(mouthPatchProg)
+        GLES30.glUseProgram(mouthAlphaProg)
         GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, sceneTex)
-        GLES30.glUniform1i(uPatchTex, 0)
+        GLES30.glUniform1i(uAlphaTex, 0)
+        GLES30.glUniform1f(uAlphaCutoff, MOUTH_ALPHA_CUTOFF)
+        GLES30.glUniform1f(uAlphaFeather, MOUTH_ALPHA_FEATHER)
         GLES30.glEnable(GLES30.GL_BLEND)
         GLES30.glBlendFunc(GLES30.GL_ONE, GLES30.GL_ONE_MINUS_SRC_ALPHA)
         GLES30.glBindVertexArray(mouthPatchVao)
@@ -731,12 +728,26 @@ class SplatRenderer(
                 gl_Position = vec4(pos, 0.0, 1.0);
             }"""
 
-        private const val MOUTH_PATCH_FS = """#version 300 es
+        private const val MOUTH_ALPHA_CUTOFF = 0.02f
+        private const val MOUTH_ALPHA_FEATHER = 0.08f
+
+        private const val MOUTH_ALPHA_FS = """#version 300 es
             precision mediump float;
             in vec2 v_uv;
             uniform sampler2D tex;
+            uniform float alphaCutoff;
+            uniform float alphaFeather;
             out vec4 c;
-            void main() { c = texture(tex, v_uv); }"""
+            void main() {
+                vec4 samp = texture(tex, v_uv);
+                if (samp.a < alphaCutoff) discard;
+                float a = samp.a;
+                if (alphaFeather > 0.0) {
+                    a = smoothstep(alphaCutoff, alphaCutoff + alphaFeather, samp.a);
+                    samp.rgb *= a / max(samp.a, 1.0e-5);
+                }
+                c = vec4(samp.rgb, a);
+            }"""
 
         private const val SPLAT_FS = """#version 300 es
             precision highp float;

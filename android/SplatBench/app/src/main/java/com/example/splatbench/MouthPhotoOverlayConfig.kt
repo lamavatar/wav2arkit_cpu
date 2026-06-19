@@ -1,8 +1,7 @@
 package com.example.splatbench
 
 /**
- * Manual 2D transform for the cropped mouth patch composited over [AppConfig.PHOTO_FILE_NAME].
- * Crop rect comes from [MouthCropConfig]; this only positions/scales the patch on the photo.
+ * Manual 2D transform for the alpha-masked mouth splat layer composited over [AppConfig.PHOTO_FILE_NAME].
  */
 object MouthPhotoOverlayConfig {
 
