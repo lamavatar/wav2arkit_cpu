@@ -192,6 +192,7 @@ class FramePrefetcher(
     }
 
     private fun renderIndices(mouthOnly: Boolean): IntArray {
+        if (AppConfig.useMouthOnlyIndices(pack)) return pack.dynamicIndices
         if (AppConfig.HEAD_BONE_ENABLED && pack.hasHeadAnimation) return pack.allIndices
         return if (mouthOnly) pack.dynamicIndices else pack.allIndices
     }

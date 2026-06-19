@@ -1,8 +1,12 @@
 package com.example.splatbench
 
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.opengl.GLES30
 import android.opengl.GLSurfaceView
+import android.opengl.GLUtils
 import android.os.SystemClock
+import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.ExecutorService
@@ -59,8 +63,67 @@ class SplatRenderer(
         }
     }
 
+    @Volatile var photoComposite = AppConfig.PHOTO_COMPOSITE
+        private set
+
+    fun setPhotoComposite(enabled: Boolean) {
+        photoComposite = enabled
+        if (!enabled) {
+            mouthScissor = null
+        }
+    }
+
+    /** Upload [file] to [photoTex] on the GL thread. */
+    fun loadPhotoTexture(file: File) {
+        val bmp = BitmapFactory.decodeFile(file.absolutePath) ?: return
+        val square = cropCenterSquare(bmp)
+        if (square !== bmp) bmp.recycle()
+        if (photoTex == 0) {
+            val tex = IntArray(1)
+            GLES30.glGenTextures(1, tex, 0)
+            photoTex = tex[0]
+        }
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, photoTex)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_CLAMP_TO_EDGE)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE)
+        GLUtils.texImage2D(GLES30.GL_TEXTURE_2D, 0, square, 0)
+        square.recycle()
+        photoReady = true
+        updateMouthScissor()
+    }
+
+    fun reloadPhotoTexture() {
+        val file = AppConfig.photoFile()
+        if (file.isFile) loadPhotoTexture(file)
+    }
+
+    private fun cropCenterSquare(src: Bitmap): Bitmap {
+        val w = src.width
+        val h = src.height
+        if (w == h) return src
+        val side = min(w, h)
+        val x = (w - side) / 2
+        val y = (h - side) / 2
+        return Bitmap.createBitmap(src, x, y, side, side)
+    }
+
+    private fun updateMouthScissor() {
+        if (!photoComposite || !photoReady) {
+            mouthScissor = null
+            return
+        }
+        mouthScissor = MouthRegion.screenBBox(
+            pack, rot, tv, fy, sq * 0.5f, sq * 0.5f, sq.toFloat(), sq.toFloat(),
+        )
+    }
+
     private fun compositeMouthOnly(): Boolean =
         AppConfig.useCompositeMouthOnly(pack)
+
+    private fun usePhotoBackground(): Boolean =
+        photoComposite && photoReady
 
     @Volatile var surfaceReady = false
         private set
@@ -78,6 +141,9 @@ class SplatRenderer(
     private var quadVao = 0
     private var baseFbo = 0
     private var baseTex = 0
+    private var photoTex = 0
+    private var photoReady = false
+    private var mouthScissor: IntArray? = null
     private var uViewport = 0
     private var uTex = 0
 
@@ -147,6 +213,8 @@ class SplatRenderer(
         setupCamera()
         setupBaseFbo()
         baseReady = false
+        if (photoComposite) reloadPhotoTexture()
+        updateMouthScissor()
         surfaceReady = true
         callbacks.onSurfaceReady()
     }
@@ -187,7 +255,7 @@ class SplatRenderer(
     }
 
     fun ensureStaticBase() {
-        if (!compositeMouthOnly()) return
+        if (!AppConfig.needsStaticGaussianBase(pack)) return
         baseReady = false
         ensureBase()
     }
@@ -266,7 +334,7 @@ class SplatRenderer(
             state == PlaybackState.DONE -> frameCache.get(frameIdx) ?: frameCache.get(0)
             else -> frameCache.get(0)
         }
-        if (cached != null && compositeMouthOnly()) ensureBase()
+        if (cached != null && AppConfig.needsStaticGaussianBase(pack)) ensureBase()
 
         val tGeom = System.nanoTime()
         val instSize = if (cached != null) uploadInstance(cached) else 0
@@ -274,7 +342,9 @@ class SplatRenderer(
 
         val tDraw = System.nanoTime()
         if (cached != null) {
-            drawScene(cached, compositeMouthOnly(), instSize)
+            drawScene(cached, instSize)
+        } else if (usePhotoBackground()) {
+            drawPhotoOnly()
         } else {
             renderBackgroundOnly()
         }
@@ -322,20 +392,45 @@ class SplatRenderer(
         return size
     }
 
-    private fun drawScene(cached: CachedFrame, mouthOnly: Boolean, instSize: Int) {
+    private fun drawPhotoOnly() {
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
         GLES30.glViewport(0, 0, surfW, surfH)
         GLES30.glClearColor(bgR, bgG, bgB, 1f)
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
         GLES30.glViewport(ox, oy, sq, sq)
-        if (mouthOnly) drawQuad(baseTex)
+        drawQuad(photoTex)
+    }
+
+    private fun drawScene(cached: CachedFrame, instSize: Int) {
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+        GLES30.glViewport(0, 0, surfW, surfH)
+        GLES30.glClearColor(bgR, bgG, bgB, 1f)
+        GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
+        GLES30.glViewport(ox, oy, sq, sq)
+        when {
+            usePhotoBackground() -> drawQuad(photoTex)
+            compositeMouthOnly() -> {
+                ensureBase()
+                drawQuad(baseTex)
+            }
+        }
         if (instSize > 0) {
-            drawSplats(instVbo, cached.instanceCount)
+            val sc = if (usePhotoBackground()) mouthScissor else null
+            drawSplats(instVbo, cached.instanceCount, sc)
         }
     }
 
-    private fun drawSplats(vbo: Int, count: Int) {
+    private fun drawSplats(vbo: Int, count: Int, scissorTopLeft: IntArray? = null) {
         if (count <= 0) return
+        if (scissorTopLeft != null) {
+            val x = ox + scissorTopLeft[0]
+            val yTop = scissorTopLeft[1]
+            val w = scissorTopLeft[2]
+            val h = scissorTopLeft[3]
+            val glY = surfH - oy - yTop - h
+            GLES30.glEnable(GLES30.GL_SCISSOR_TEST)
+            GLES30.glScissor(x, glY, w, h)
+        }
         GLES30.glUseProgram(splatProg)
         GLES30.glUniform2f(uViewport, sq.toFloat(), sq.toFloat())
         GLES30.glEnable(GLES30.GL_BLEND)
@@ -357,6 +452,9 @@ class SplatRenderer(
         GLES30.glDrawArraysInstanced(GLES30.GL_TRIANGLES, 0, 6, count)
         GLES30.glBindVertexArray(0)
         GLES30.glDisable(GLES30.GL_BLEND)
+        if (scissorTopLeft != null) {
+            GLES30.glDisable(GLES30.GL_SCISSOR_TEST)
+        }
     }
 
     private fun bindInstanceAttr(loc: Int, size: Int, offset: Int) {
