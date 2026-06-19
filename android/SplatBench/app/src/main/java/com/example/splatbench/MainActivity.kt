@@ -11,6 +11,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.view.View
 import android.widget.AdapterView
@@ -37,15 +38,16 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
     private val perfStats = PerfStats()
     private var lastStatUpdateMs = 0L
 
-    private var mediaPlayer: MediaPlayer? = null
-    private var audioUri: Uri? = null
-
-    // ONNX lip-sync pipeline
-    private lateinit var audioInput: AudioInputController
+    private val session = PlaybackSession()
     private val expressionBuffer = ExpressionBuffer()
+    private lateinit var audioInput: AudioInputController
+
     @Volatile private var onnx: Wav2ArkitOnnx? = null
     @Volatile private var onnxError: String? = null
     private var pipeline: OnnxExpressionPipeline? = null
+
+    private var mediaPlayer: MediaPlayer? = null
+    private var audioUri: Uri? = null
 
     private var currentMode = AppConfig.AudioInputMode.FILE
     private var fileDurationMs = 0
@@ -53,35 +55,14 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
     private var micGranted = false
 
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val positionRunnable = object : Runnable {
-        override fun run() {
-            if (playback.state == PlaybackState.PLAYING) {
-                when (currentMode) {
-                    AppConfig.AudioInputMode.FILE -> {
-                        val mp = mediaPlayer
-                        if (mp != null) {
-                            try {
-                                playback.updateAudioPositionMs(mp.currentPosition)
-                            } catch (_: IllegalStateException) {
-                            }
-                        }
-                    }
-                    AppConfig.AudioInputMode.MIC -> {
-                        val ms = ((System.nanoTime() - micClockStartNanos) / 1_000_000L).toInt()
-                        playback.updateAudioPositionMs(ms)
-                    }
-                }
-                mainHandler.postDelayed(this, 16L)
-            }
-        }
-    }
+    private val frameRenderRunnable = Runnable { glView?.requestRender() }
 
     private val pickAudio = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) return@registerForActivityResult
         try {
             contentResolver.takePersistableUriPermission(
                 uri,
-                android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION,
             )
         } catch (_: SecurityException) {
         }
@@ -131,7 +112,6 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         }
         binding.playButton.setOnClickListener { togglePlayback() }
 
-        // Mic UI / permission only when enabled.
         if (currentMode == AppConfig.AudioInputMode.MIC) {
             binding.pickAudioButton.visibility = View.GONE
             micGranted = ContextCompat.checkSelfPermission(
@@ -170,7 +150,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
                 if (n == AppConfig.BUILD_THREADS) return
                 AppConfig.BUILD_THREADS = n
                 perfStats.reset()
-                if (playback.state != PlaybackState.PREBUFFERING &&
+                if (playback.state != PlaybackState.WARMING_UP &&
                     playback.state != PlaybackState.PLAYING
                 ) {
                     rebuildPreview()
@@ -247,6 +227,8 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
             pack = p,
             cache = frameCache,
             controller = playback,
+            expressionBuffer = expressionBuffer,
+            session = session,
             perfStats = perfStats,
         )
         prefetcher = pf
@@ -256,22 +238,20 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         val r = SplatRenderer(p, this, playback, frameCache, pf.builder, perfStats)
         renderer = r
         view.setRenderer(r)
-        view.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
+        view.renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
         glView = view
         view.onResume()
 
         binding.pickAudioButton.isEnabled = currentMode == AppConfig.AudioInputMode.FILE
         playback.state = PlaybackState.IDLE
         refreshStats(splats = splatCount(p))
-        // Preview is triggered by onSurfaceReady() once the GL surface/camera are
-        // set up; building here could project with the placeholder viewport.
         if (renderer?.surfaceReady == true) rebuildPreview()
         updateControls()
     }
 
     private fun togglePlayback() {
         when (playback.state) {
-            PlaybackState.PREBUFFERING, PlaybackState.PLAYING -> stopPlayback()
+            PlaybackState.WARMING_UP, PlaybackState.PLAYING -> stopPlayback()
             else -> startPlayback()
         }
     }
@@ -281,13 +261,13 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         val mouthOnly = AppConfig.MOUTH_ONLY
         pf.cancel()
         frameCache.clear()
-        renderer?.clearLastGoodCached()
         pf.resetCancel()
         glView?.queueEvent {
             renderer?.syncPrefetchView()
             if (mouthOnly) renderer?.ensureStaticBase()
             runOnUiThread {
-                pf.buildPreviewFrame(0, mouthOnly, previewListener)
+                pf.buildNeutralPreview(mouthOnly, previewListener)
+                glView?.requestRender()
             }
         }
     }
@@ -302,8 +282,6 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
     }
 
     private val previewListener = object : FramePrefetcher.Listener {
-        override fun onPrebufferProgress(built: Int, total: Int) {}
-        override fun onPrebufferComplete() {}
         override fun onError(message: String) {
             runOnUiThread { Toast.makeText(this@MainActivity, message, Toast.LENGTH_SHORT).show() }
         }
@@ -314,8 +292,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         val pk = pack ?: return
         val model = onnx
         if (model == null) {
-            val msg = onnxError ?: "Model still loading…"
-            Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, onnxError ?: "Model still loading…", Toast.LENGTH_SHORT).show()
             return
         }
         if (currentMode == AppConfig.AudioInputMode.FILE && audioUri == null) {
@@ -329,75 +306,81 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
 
         val mouthOnly = AppConfig.MOUTH_ONLY
         perfStats.reset()
+        session.reset()
         playback.prebufferSeconds = AppConfig.PREBUFFER_SECONDS
         playback.resetAudioPosition()
-        playback.state = PlaybackState.PREBUFFERING
-        pf.cancel()
-        pf.stopLeadPrefetch()
+        playback.state = PlaybackState.WARMING_UP
 
-        // Reset + start the audio producer feeding the shared ring.
+        pf.cancel()
+        pf.stopBuild()
+        frameCache.clear()
         expressionBuffer.clear()
+        audioInput.buffer.reset()
+
         when (currentMode) {
-            AppConfig.AudioInputMode.FILE -> fileDurationMs = audioInput.startFile(audioUri!!)
-            AppConfig.AudioInputMode.MIC -> audioInput.startMic()
+            AppConfig.AudioInputMode.FILE ->
+                fileDurationMs = audioInput.startFile(audioUri!!, session)
+            AppConfig.AudioInputMode.MIC -> audioInput.startMic(session)
         }
 
-        // Inference pipeline reads the ring (FILE/MIC identical path).
-        val pipe = OnnxExpressionPipeline(model, audioInput.ring, expressionBuffer)
+        val pipe = OnnxExpressionPipeline(model, audioInput.buffer, expressionBuffer, session)
         pipeline = pipe
         pipe.start()
 
-        // Route geometry weights through the ONNX expression source.
-        playback.expressionSource = OnnxExpressionSource(pk, expressionBuffer) { frameCountProvider() }
-
+        playback.expressionSource = OnnxExpressionSource(pk, expressionBuffer) { liveFrameCount() }
         updateControls()
 
         glView?.queueEvent {
             renderer?.syncPrefetchView()
             if (mouthOnly) renderer?.ensureStaticBase()
             runOnUiThread {
-                pf.startPrebuffer(mouthOnly, prebufferListener)
+                pf.startSession(mouthOnly, sessionListener)
             }
         }
     }
 
-    private fun frameCountProvider(): Int =
+    private fun liveFrameCount(): Int =
         when (currentMode) {
-            AppConfig.AudioInputMode.FILE ->
-                ceil(fileDurationMs * AppConfig.EXPRESSION_FPS / 1000.0).toInt().coerceAtLeast(1)
-            AppConfig.AudioInputMode.MIC -> Int.MAX_VALUE / 4
+            AppConfig.AudioInputMode.FILE -> {
+                val inferred = expressionBuffer.count
+                val fromDur = ceil(fileDurationMs * AppConfig.EXPRESSION_FPS / 1000.0).toInt()
+                maxOf(inferred, fromDur).coerceAtLeast(1)
+            }
+            AppConfig.AudioInputMode.MIC -> expressionBuffer.count.coerceAtLeast(1)
         }
 
-    private val prebufferListener = object : FramePrefetcher.Listener {
-        override fun onPrebufferProgress(built: Int, total: Int) {
+    private val sessionListener = object : FramePrefetcher.Listener {
+        override fun onWarmupProgress(built: Int, total: Int) {
             val last = frameCache.get(built - 1)
-            runOnUiThread { refreshStats(last?.instanceCount ?: splatCount(pack)) }
+            runOnUiThread {
+                refreshStats(last?.instanceCount ?: splatCount(pack))
+                glView?.requestRender()
+            }
         }
 
-        override fun onPrebufferComplete() {
+        override fun onWarmupComplete() {
             runOnUiThread { beginAudioAndPlayback() }
         }
 
         override fun onError(message: String) {
             runOnUiThread {
-                playback.state = PlaybackState.READY
-                updateControls()
+                finishSession(resetToReady = true)
                 Toast.makeText(this@MainActivity, message, Toast.LENGTH_SHORT).show()
             }
         }
     }
 
     private fun beginAudioAndPlayback() {
-        val pf = prefetcher ?: return
-        val mouthOnly = AppConfig.MOUTH_ONLY
+        if (playback.state != PlaybackState.WARMING_UP) return
+
+        playback.resetAudioPosition()
 
         if (currentMode == AppConfig.AudioInputMode.MIC) {
             micClockStartNanos = System.nanoTime()
-            playback.resetAudioPosition()
             playback.state = PlaybackState.PLAYING
+            renderer?.startFixedFps()
             updateControls()
-            startPositionUpdates()
-            pf.startLeadPrefetch(mouthOnly)
+            glView?.requestRender()
             return
         }
 
@@ -408,53 +391,86 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         try {
             mp.setDataSource(this, uri)
             mp.setOnCompletionListener {
-                playback.state = PlaybackState.DONE
-                pf.stopLeadPrefetch()
-                stopPositionUpdates()
-                updateControls()
+                runOnUiThread { onPlaybackComplete() }
             }
             mp.setOnPreparedListener {
                 playback.resetAudioPosition()
                 mp.start()
                 playback.state = PlaybackState.PLAYING
+                renderer?.startFixedFps()
                 updateControls()
-                startPositionUpdates()
-                pf.startLeadPrefetch(mouthOnly)
+                glView?.requestRender()
             }
             mp.prepareAsync()
         } catch (e: Exception) {
-            playback.state = PlaybackState.READY
-            updateControls()
+            finishSession(resetToReady = true)
             Toast.makeText(this, e.message ?: "audio failed", Toast.LENGTH_SHORT).show()
         }
     }
 
-    private fun startPositionUpdates() {
-        mainHandler.removeCallbacks(positionRunnable)
-        mainHandler.post(positionRunnable)
+    private fun onPlaybackComplete() {
+        finishSession(resetToReady = true)
     }
 
-    private fun stopPositionUpdates() {
-        mainHandler.removeCallbacks(positionRunnable)
+  override fun onUpdateAudioClock() {
+        when (currentMode) {
+            AppConfig.AudioInputMode.FILE -> {
+                val mp = mediaPlayer
+                if (mp != null) {
+                    try {
+                        playback.updateAudioPositionMs(mp.currentPosition)
+                    } catch (_: IllegalStateException) {
+                    }
+                }
+            }
+            AppConfig.AudioInputMode.MIC -> {
+                val ms = ((System.nanoTime() - micClockStartNanos) / 1_000_000L).toInt()
+                playback.updateAudioPositionMs(ms)
+            }
+        }
+    }
+
+    override fun scheduleNextFrame(deadlineUptimeMs: Long) {
+        mainHandler.removeCallbacks(frameRenderRunnable)
+        val delay = deadlineUptimeMs - SystemClock.uptimeMillis()
+        if (delay <= 0L) {
+            mainHandler.post(frameRenderRunnable)
+        } else {
+            mainHandler.postAtTime(frameRenderRunnable, deadlineUptimeMs)
+        }
     }
 
     private fun stopPlayback() {
+        finishSession(resetToReady = true)
+    }
+
+    /** Stop all worker threads and reset buffers; show neutral preview. */
+    private fun finishSession(resetToReady: Boolean) {
+        session.requestStop()
         prefetcher?.cancel()
-        prefetcher?.stopLeadPrefetch()
-        stopPositionUpdates()
-        releaseMediaPlayer()
+        prefetcher?.stopBuild()
         pipeline?.stop()
+        pipeline?.resetContext()
         pipeline = null
         audioInput.stop()
+        releaseMediaPlayer()
+
         playback.expressionSource = null
         playback.resetAudioPosition()
+        renderer?.stopFixedFps()
+        mainHandler.removeCallbacks(frameRenderRunnable)
+
+        expressionBuffer.clear()
+        frameCache.clear()
+        audioInput.buffer.reset()
+
         playback.state = when {
-            currentMode == AppConfig.AudioInputMode.MIC -> PlaybackState.IDLE
-            audioUri != null -> PlaybackState.READY
+            resetToReady && currentMode == AppConfig.AudioInputMode.FILE && audioUri != null ->
+                PlaybackState.READY
+            resetToReady -> PlaybackState.IDLE
             else -> PlaybackState.IDLE
         }
-        frameCache.clear()
-        expressionBuffer.clear()
+
         perfStats.reset()
         refreshStats(splats = splatCount(pack))
         updateControls()
@@ -474,7 +490,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
 
     private fun updateControls() {
         val state = playback.state
-        val busy = state == PlaybackState.PREBUFFERING || state == PlaybackState.PLAYING
+        val busy = state == PlaybackState.WARMING_UP || state == PlaybackState.PLAYING
         binding.playButton.text = if (busy) "Stop" else "Start"
         val canStart = when (currentMode) {
             AppConfig.AudioInputMode.FILE -> audioUri != null
@@ -486,7 +502,6 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         binding.threadSpinner.isEnabled = !busy
     }
 
-    /** GL-thread tick: throttle UI text updates to ~5/s. */
     override fun onStatsTick(splats: Int) {
         val now = System.currentTimeMillis()
         if (now - lastStatUpdateMs < 200) return
@@ -496,8 +511,9 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
 
     private fun refreshStats(splats: Int) {
         val mode = if (AppConfig.MOUTH_ONLY) "Mouth-only" else "Full"
+        val state = playback.state.name
         binding.statLine1.text =
-            "$mode | threads=${AppConfig.BUILD_THREADS} | splats=$splats"
+            "$mode | $state | threads=${AppConfig.BUILD_THREADS} | splats=$splats"
         binding.statLine2.text = String.format(
             "infer: %.1f ms | post: %.1f ms",
             pipeline?.lastInferMs ?: 0.0,
@@ -514,10 +530,11 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         val src = currentMode.name
         val ep = onnx?.activeEp ?: "—"
         val expr = expressionBuffer.count
-        val ringS = audioInput.ringSeconds()
+        val bufS = audioInput.bufferSeconds()
         return String.format(
-            "src:%s ep:%s expr:%d ring:%.1fs audio:%dms",
-            src, ep, expr, ringS, playback.audioPositionMs,
+            "src:%s ep:%s expr:%d buf:%.1fs audio:%dms geom:%d",
+            src, ep, expr, bufS, playback.audioPositionMs,
+            prefetcher?.builtFrameCount() ?: 0,
         )
     }
 
@@ -529,9 +546,14 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
     override fun onResume() {
         super.onResume()
         glView?.onResume()
-        if (playback.state == PlaybackState.PLAYING) {
-            if (currentMode == AppConfig.AudioInputMode.FILE) mediaPlayer?.start()
-            startPositionUpdates()
+        when (playback.state) {
+            PlaybackState.PLAYING -> {
+                if (currentMode == AppConfig.AudioInputMode.FILE) mediaPlayer?.start()
+                renderer?.startFixedFps()
+                glView?.requestRender()
+            }
+            PlaybackState.IDLE, PlaybackState.READY -> rebuildPreview()
+            else -> {}
         }
     }
 
@@ -539,13 +561,14 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         super.onPause()
         if (playback.state == PlaybackState.PLAYING) {
             if (currentMode == AppConfig.AudioInputMode.FILE) mediaPlayer?.pause()
-            stopPositionUpdates()
+            renderer?.stopFixedFps()
+            mainHandler.removeCallbacks(frameRenderRunnable)
         }
         glView?.onPause()
     }
 
     override fun onDestroy() {
-        stopPlayback()
+        finishSession(resetToReady = false)
         prefetcher?.shutdown()
         onnx?.close()
         super.onDestroy()

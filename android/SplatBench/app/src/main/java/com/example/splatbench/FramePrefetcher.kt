@@ -8,44 +8,42 @@ import java.util.concurrent.atomic.AtomicInteger
 /**
  * Builds projected splat instances off the GL thread into a [FrameCache].
  *
- * On start: pre-builds [PlaybackController.prebufferSeconds] of frames, then signals
- * [Listener.onPrebufferComplete]. During playback a background loop keeps a lead
- * buffer of the same duration ahead of the audio clock.
+ * On session start: waits for expression frames, builds
+ * [AppConfig.GEOMETRY_START_FRAMES] warmup frames, then signals ready for
+ * playback. During PLAYING keeps a lead buffer ahead of the audio clock.
  */
 class FramePrefetcher(
     private val pack: AvatarPack,
     private val cache: FrameCache,
     private val controller: PlaybackController,
+    private val expressionBuffer: ExpressionBuffer,
+    private val session: PlaybackSession,
     private val perfStats: PerfStats? = null,
 ) {
-    /** Live, runtime-selectable worker count (pool is sized to device cores). */
     private val threadCount: Int
         get() = AppConfig.BUILD_THREADS.coerceIn(1, AppConfig.MAX_BUILD_THREADS)
 
     interface Listener {
-        fun onPrebufferProgress(built: Int, total: Int)
-        fun onPrebufferComplete()
+        fun onWarmupProgress(built: Int, total: Int) {}
+        fun onWarmupComplete()
         fun onError(message: String)
     }
 
     private val exec: ExecutorService = Executors.newFixedThreadPool(AppConfig.MAX_BUILD_THREADS)
     val builder: InstanceBuilder = InstanceBuilder(pack)
     private val cancelled = AtomicBoolean(false)
-    private val leadRunning = AtomicBoolean(false)
+    private val buildRunning = AtomicBoolean(false)
     private val nextBuildIndex = AtomicInteger(0)
-    private var leadThread: Thread? = null
+    private var buildThread: Thread? = null
 
-    // Preview builds run one-at-a-time here; [previewGen] discards stale results
-    // so an older (e.g. wrong-viewport) build can never overwrite a newer one.
     private val previewExec: ExecutorService = Executors.newSingleThreadExecutor()
     private val previewGen = AtomicInteger(0)
 
     fun cancel() {
         cancelled.set(true)
-        leadRunning.set(false)
-        leadThread?.interrupt()
-        leadThread = null
-        // Invalidate any queued/running preview build so it won't publish.
+        buildRunning.set(false)
+        buildThread?.interrupt()
+        buildThread = null
         previewGen.incrementAndGet()
     }
 
@@ -53,84 +51,56 @@ class FramePrefetcher(
         cancelled.set(false)
     }
 
-    /** Copy the renderer's current view into our builder (call from GL thread before prebuffer). */
     fun syncViewFrom(rot: FloatArray, tv: FloatArray, fy: Float, cx: Float, cy: Float, vw: Float, vh: Float) {
         builder.setView(rot, tv, fy, cx, cy, vw, vh)
     }
 
-    fun buildPreviewFrame(frameIndex: Int, mouthOnly: Boolean, listener: Listener?) {
+    fun buildNeutralPreview(mouthOnly: Boolean, listener: Listener?) {
         val gen = previewGen.incrementAndGet()
         previewExec.execute {
             try {
-                // A newer preview request was queued after us — skip this one.
                 if (gen != previewGen.get()) return@execute
                 val idx = renderIndices(mouthOnly)
-                val weights = source().weightsForFrame(frameIndex)
+                val weights = FloatArray(pack.numMorphs)
                 val t0 = System.nanoTime()
-                val cached = builder.buildCached(frameIndex, weights, idx, exec, threadCount)
+                val cached = builder.buildCached(0, weights, idx, exec, threadCount)
                 val buildMs = (System.nanoTime() - t0) / 1_000_000.0
                 perfStats?.addBuild(buildMs)
-                // Only publish if still the latest request (avoids stale overwrite).
                 if (gen == previewGen.get()) cache.put(cached.copy(buildMs = buildMs))
             } catch (e: Exception) {
-                listener?.onError(e.message ?: "preview build failed")
+                listener?.onError(e.message ?: "neutral preview build failed")
             }
         }
     }
 
-    fun startPrebuffer(mouthOnly: Boolean, listener: Listener) {
-        Thread({
+    /**
+     * Warm up [GEOMETRY_START_FRAMES] geometry frames after expression data is
+     * available, then continue building ahead during PLAYING.
+     */
+    fun startSession(mouthOnly: Boolean, listener: Listener) {
+        if (!buildRunning.compareAndSet(false, true)) return
+        val t = Thread({
             try {
                 resetCancel()
                 cache.clear()
                 nextBuildIndex.set(0)
-
-                val src = source()
-                val total = controller.frameCountForSeconds(controller.prebufferSeconds, src.fps)
-                    .let { req -> val fc = src.frameCount(); if (fc > 0) req.coerceAtMost(fc) else req }
                 val indices = renderIndices(mouthOnly)
+                val warmup = AppConfig.GEOMETRY_START_FRAMES
 
-                for (i in 0 until total) {
-                    if (cancelled.get()) return@Thread
-                    if (!awaitFrame(i, src)) return@Thread
+                for (i in 0 until warmup) {
+                    if (cancelled.get() || session.isStopRequested()) return@Thread
+                    if (!awaitExpression(i)) return@Thread
                     buildFrame(i, mouthOnly, indices)
                     nextBuildIndex.set(i + 1)
-                    listener.onPrebufferProgress(i + 1, total)
+                    listener.onWarmupProgress(i + 1, warmup)
+                    pauseBetweenBuilds()
                 }
 
-                if (cancelled.get()) return@Thread
-                listener.onPrebufferComplete()
-            } catch (e: Exception) {
-                listener.onError(e.message ?: "prebuffer failed")
-            }
-        }, "prefetch-prebuffer").start()
-    }
+                if (cancelled.get() || session.isStopRequested()) return@Thread
+                listener.onWarmupComplete()
 
-    private fun source(): ExpressionSource =
-        controller.expressionSource ?: BakedExpressionSource(pack)
-
-    /** Block until the expression source has [frame] ready, or cancel/EOF. */
-    private fun awaitFrame(frame: Int, src: ExpressionSource): Boolean {
-        while (!src.hasFrame(frame)) {
-            if (cancelled.get()) return false
-            val fc = src.frameCount()
-            if (fc in 1..frame) return false // past the end of a finished source
-            try {
-                Thread.sleep(8)
-            } catch (_: InterruptedException) {
-                return false
-            }
-        }
-        return true
-    }
-
-    fun startLeadPrefetch(mouthOnly: Boolean) {
-        if (!leadRunning.compareAndSet(false, true)) return
-        val t = Thread({
-            try {
-                val indices = renderIndices(mouthOnly)
                 val src = source()
-                while (leadRunning.get() && !cancelled.get()) {
+                while (buildRunning.get() && !cancelled.get() && !session.isStopRequested()) {
                     val state = controller.state
                     if (state != PlaybackState.PLAYING) {
                         Thread.sleep(20)
@@ -144,10 +114,12 @@ class FramePrefetcher(
                     if (frameCount > 0) target = minOf(target, frameCount - 1)
                     var idx = nextBuildIndex.get()
 
-                    while (idx <= target && leadRunning.get() && !cancelled.get()) {
-                        if (!src.hasFrame(idx)) break // wait for more inference
+                    var builtAny = false
+                    while (idx <= target && buildRunning.get() && !cancelled.get() && !session.isStopRequested()) {
+                        if (!src.hasFrame(idx)) break
                         if (!cache.has(idx)) {
                             buildFrame(idx, mouthOnly, indices)
+                            builtAny = true
                         }
                         idx++
                         nextBuildIndex.set(idx)
@@ -160,28 +132,52 @@ class FramePrefetcher(
                     ) {
                         break
                     }
-                    Thread.sleep(10)
+                    if (!builtAny) Thread.sleep(10) else pauseBetweenBuilds()
                 }
-            } catch (_: InterruptedException) {
-                // shutdown
+            } catch (e: Exception) {
+                listener.onError(e.message ?: "geometry build failed")
             } finally {
-                leadRunning.set(false)
+                buildRunning.set(false)
             }
-        }, "prefetch-lead")
-        leadThread = t
+        }, "geometry-build")
+        buildThread = t
         t.start()
     }
 
-    fun stopLeadPrefetch() {
-        leadRunning.set(false)
-        leadThread?.interrupt()
-        leadThread = null
+    fun stopBuild() {
+        buildRunning.set(false)
+        buildThread?.interrupt()
+        buildThread = null
     }
 
     fun shutdown() {
         cancel()
         exec.shutdownNow()
         previewExec.shutdownNow()
+    }
+
+    fun builtFrameCount(): Int = nextBuildIndex.get()
+
+    private fun source(): ExpressionSource =
+        controller.expressionSource ?: BakedExpressionSource(pack)
+
+    private fun awaitExpression(frame: Int): Boolean {
+        while (!expressionBuffer.hasFrame(frame)) {
+            if (cancelled.get() || session.isStopRequested()) return false
+            try {
+                Thread.sleep(AppConfig.POLL_MS)
+            } catch (_: InterruptedException) {
+                return false
+            }
+        }
+        return true
+    }
+
+    private fun pauseBetweenBuilds() {
+        try {
+            Thread.sleep(AppConfig.GEOMETRY_BUILD_PAUSE_MS)
+        } catch (_: InterruptedException) {
+        }
     }
 
     private fun clipDurationMs(src: ExpressionSource): Int {
