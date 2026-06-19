@@ -36,7 +36,13 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
     private val frameCache = FrameCache()
     private var prefetcher: FramePrefetcher? = null
     private val perfStats = PerfStats()
-    private var lastStatUpdateMs = 0L
+    private var lastSplats = 0
+
+    /** Uptime when audio ingest starts ([startPlayback]). */
+    private var playbackPipelineStartUptimeMs = 0L
+
+    /** Audio-read start → first audio output (locked when playback begins). */
+    private var measuredStartupLatencyMs: Long? = null
 
     private val session = PlaybackSession()
     private val expressionBuffer = ExpressionBuffer()
@@ -56,6 +62,12 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val frameRenderRunnable = Runnable { glView?.requestRender() }
+    private val statRefreshRunnable = object : Runnable {
+        override fun run() {
+            refreshStats(lastSplats)
+            mainHandler.postDelayed(this, AppConfig.STAT_REFRESH_MS)
+        }
+    }
 
     private val pickAudio = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) return@registerForActivityResult
@@ -104,7 +116,6 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
 
         binding.pickAudioButton.isEnabled = false
         setupModeAndThreadControls()
-        refreshStats(splats = 0)
         updateControls()
 
         binding.pickAudioButton.setOnClickListener {
@@ -121,6 +132,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         }
 
         ensureStorageAccessAndLoad()
+        mainHandler.post(statRefreshRunnable)
     }
 
     private fun setupModeAndThreadControls() {
@@ -143,7 +155,6 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
             syncHeadBoneToBuilders()
             perfStats.reset()
             rebuildPreview()
-            refreshStats(splatCount(pack))
         }
 
         val options = AppConfig.THREAD_OPTIONS
@@ -167,7 +178,6 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
                 ) {
                     rebuildPreview()
                 }
-                refreshStats(splatCount(pack))
             }
 
             override fun onNothingSelected(parent: AdapterView<*>?) {}
@@ -227,11 +237,10 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         updateHeadBoneSwitchState(pack)
         glView?.queueEvent {
             if (AppConfig.PHOTO_COMPOSITE) renderer?.reloadPhotoTexture()
-            runOnUiThread {
-                perfStats.reset()
-                rebuildPreview()
-                refreshStats(splatCount(pack))
-            }
+                runOnUiThread {
+                    perfStats.reset()
+                    rebuildPreview()
+                }
         }
     }
 
@@ -324,7 +333,6 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
 
         binding.pickAudioButton.isEnabled = currentMode == AppConfig.AudioInputMode.FILE
         playback.state = PlaybackState.IDLE
-        refreshStats(splats = splatCount(p))
         maybeRebuildIdlePreview()
         updateControls()
     }
@@ -411,7 +419,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
             previewRebuildPending = false
             runOnUiThread {
                 val cached = frameCache.get(0)
-                refreshStats(cached?.instanceCount ?: splatCount(pack))
+                lastSplats = cached?.instanceCount ?: splatCount(pack)
                 glView?.queueEvent {
                     if (AppConfig.needsStaticGaussianBase(pack ?: return@queueEvent)) renderer?.ensureStaticBase()
                     runOnUiThread { glView?.requestRender() }
@@ -445,6 +453,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         val mouthOnly = AppConfig.useMouthOnlyIndices(pk)
         perfStats.reset()
         session.reset()
+        measuredStartupLatencyMs = null
         playback.prebufferSeconds = AppConfig.PREBUFFER_SECONDS
         playback.resetAudioPosition()
         playback.state = PlaybackState.WARMING_UP
@@ -455,6 +464,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         expressionBuffer.clear()
         audioInput.buffer.reset()
 
+        playbackPipelineStartUptimeMs = SystemClock.uptimeMillis()
         when (currentMode) {
             AppConfig.AudioInputMode.FILE ->
                 fileDurationMs = audioInput.startFile(audioUri!!, session)
@@ -491,7 +501,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         override fun onWarmupProgress(built: Int, total: Int) {
             val last = frameCache.get(built - 1)
             runOnUiThread {
-                refreshStats(last?.instanceCount ?: splatCount(pack))
+                lastSplats = last?.instanceCount ?: splatCount(pack)
                 glView?.requestRender()
             }
         }
@@ -514,6 +524,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         playback.resetAudioPosition()
 
         if (currentMode == AppConfig.AudioInputMode.MIC) {
+            recordStartupLatency()
             micClockStartNanos = System.nanoTime()
             playback.state = PlaybackState.PLAYING
             renderer?.startFixedFps()
@@ -533,6 +544,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
             }
             mp.setOnPreparedListener {
                 playback.resetAudioPosition()
+                recordStartupLatency()
                 mp.start()
                 playback.state = PlaybackState.PLAYING
                 renderer?.startFixedFps()
@@ -595,6 +607,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
 
         playback.expressionSource = null
         playback.resetAudioPosition()
+        playbackPipelineStartUptimeMs = 0L
         renderer?.stopFixedFps()
         mainHandler.removeCallbacks(frameRenderRunnable)
 
@@ -610,7 +623,6 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         }
 
         perfStats.reset()
-        refreshStats(splats = splatCount(pack))
         updateControls()
         rebuildPreview()
     }
@@ -643,13 +655,27 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
     }
 
     override fun onStatsTick(splats: Int) {
-        val now = System.currentTimeMillis()
-        if (now - lastStatUpdateMs < 200) return
-        lastStatUpdateMs = now
-        runOnUiThread { refreshStats(splats) }
+        lastSplats = splats
+    }
+
+    private fun recordStartupLatency() {
+        if (measuredStartupLatencyMs != null) return
+        val start = playbackPipelineStartUptimeMs
+        if (start <= 0L) return
+        measuredStartupLatencyMs = (SystemClock.uptimeMillis() - start).coerceAtLeast(0L)
+    }
+
+    private fun startupLatencyText(): String {
+        measuredStartupLatencyMs?.let { return "${it}ms" }
+        if (playback.state == PlaybackState.WARMING_UP && playbackPipelineStartUptimeMs > 0L) {
+            val elapsed = SystemClock.uptimeMillis() - playbackPipelineStartUptimeMs
+            return "${elapsed}ms…"
+        }
+        return "—"
     }
 
     private fun refreshStats(splats: Int) {
+        lastSplats = splats
         val p = pack
         val modeLabel = AppConfig.RENDER_MODE.label
         val mode = if (AppConfig.HEAD_BONE_ENABLED && p?.hasHeadAnimation == true && AppConfig.allowsHeadBone()) {
@@ -659,16 +685,22 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         }
         val head = if (p?.hasHeadAnimation == true) " head:${p.headAnimName}" else ""
         val state = playback.state.name
+        val renderSq = renderer?.renderSquarePx ?: 0
+        val renderRes = if (renderSq > 0) "${renderSq}x${renderSq}" else "—"
         binding.statLine1.text =
-            "$mode | $state | threads=${AppConfig.BUILD_THREADS} | splats=$splats$head"
+            "$mode | $state | threads=${AppConfig.BUILD_THREADS} | splats=$splats$head | $renderRes"
         binding.statLine2.text = String.format(
-            "infer: %.1f ms | post: %.1f ms",
+            "infer: %.1f ms | post: %.1f ms | build: %.2f | geom: %.2f | draw: %.2f ms",
             pipeline?.lastInferMs ?: 0.0,
             pipeline?.lastPostprocessMs ?: 0.0,
+            perfStats.buildAvgMs, perfStats.geomAvgMs, perfStats.drawAvgMs,
         )
         binding.statLine3.text = String.format(
-            "build: %.2f | geom: %.2f | draw: %.2f ms (1s avg)",
-            perfStats.buildAvgMs, perfStats.geomAvgMs, perfStats.drawAvgMs,
+            "latency: %s | audioBuf: %.1fs | expr: %d | geomCache: %d",
+            startupLatencyText(),
+            audioInput.bufferSeconds(),
+            expressionBuffer.count,
+            frameCache.size(),
         )
         binding.statLine4.text = statLine4()
     }
@@ -676,12 +708,9 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
     private fun statLine4(): String {
         val src = currentMode.name
         val ep = onnx?.activeEp ?: "—"
-        val expr = expressionBuffer.count
-        val bufS = audioInput.bufferSeconds()
         return String.format(
-            "src:%s ep:%s expr:%d buf:%.1fs audio:%dms geom:%d",
-            src, ep, expr, bufS, playback.audioPositionMs,
-            prefetcher?.builtFrameCount() ?: 0,
+            "src:%s ep:%s audioPos:%dms",
+            src, ep, playback.audioPositionMs,
         )
     }
 
@@ -715,6 +744,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
     }
 
     override fun onDestroy() {
+        mainHandler.removeCallbacks(statRefreshRunnable)
         finishSession(resetToReady = false)
         prefetcher?.shutdown()
         onnx?.close()

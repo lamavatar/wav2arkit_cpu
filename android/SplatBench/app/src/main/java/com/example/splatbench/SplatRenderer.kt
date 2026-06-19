@@ -129,6 +129,10 @@ class SplatRenderer(
     @Volatile var surfaceReady = false
         private set
 
+    /** Square splat viewport side in pixels (actual Gaussian render resolution). */
+    val renderSquarePx: Int
+        get() = sq
+
     private val buildThreads: Int
         get() = AppConfig.BUILD_THREADS.coerceIn(1, AppConfig.MAX_BUILD_THREADS)
 

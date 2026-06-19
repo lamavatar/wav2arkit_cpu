@@ -176,6 +176,9 @@ object AppConfig {
 
     const val RENDER_FPS = 30
 
+    /** UI stats overlay refresh interval. */
+    const val STAT_REFRESH_MS = 500L
+
 
 
     // --- Audio buffer / polling / chunking -------------------------------- //
