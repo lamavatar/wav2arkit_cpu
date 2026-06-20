@@ -197,7 +197,7 @@ object AppConfig {
     /** Upper cap when sizing the buffer to fit a picked audio file. */
     const val AUDIO_BUFFER_MAX_SECONDS = 300f
 
-    const val POLL_MS = 200L                // producer + inference poll interval
+    const val POLL_MS = 30L                // producer + inference poll interval
 
     const val FILE_TICK_MS = 500L           // file producer: bytes per tick
 
