@@ -689,9 +689,6 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         when (currentMode) {
             AppConfig.AudioInputMode.FILE -> {
                 bufferPlayer?.let { playback.updateAudioPositionMs(it.positionMs()) }
-                if (audioInput.buffer.isPlaybackComplete()) {
-                    runOnUiThread { onPlaybackComplete() }
-                }
             }
             AppConfig.AudioInputMode.MIC -> {
                 val ms = ((System.nanoTime() - micClockStartNanos) / 1_000_000L).toInt()

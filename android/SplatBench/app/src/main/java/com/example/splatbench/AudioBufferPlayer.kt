@@ -8,13 +8,14 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Streams u8 PCM from [AudioBuffer] play cursor to [AudioTrack] (16 kHz mono).
- * Invokes [onComplete] on the calling thread when buffer playback reaches EOS.
+ * Invokes [onComplete] on the play thread when buffer playback reaches EOS.
  */
 class AudioBufferPlayer(
     private val buffer: AudioBuffer,
     private val onComplete: () -> Unit,
 ) {
     private val running = AtomicBoolean(false)
+    private val trackReleased = AtomicBoolean(false)
     private var thread: Thread? = null
     private var track: AudioTrack? = null
 
@@ -22,6 +23,7 @@ class AudioBufferPlayer(
 
     fun start() {
         if (!running.compareAndSet(false, true)) return
+        trackReleased.set(false)
         val t = Thread({ playLoop() }, "audio-buffer-play")
         thread = t
         t.start()
@@ -29,9 +31,14 @@ class AudioBufferPlayer(
 
     fun stop() {
         running.set(false)
-        thread?.interrupt()
+        val t = thread
         thread = null
-        releaseTrack()
+        t?.interrupt()
+        try {
+            t?.join(2000)
+        } catch (_: InterruptedException) {
+        }
+        releaseTrackOnce()
     }
 
     fun pause() {
@@ -83,6 +90,7 @@ class AudioBufferPlayer(
 
         val tickU8 = AppConfig.pollTickBytes.coerceAtLeast(320)
         val i16Scratch = ShortArray(tickU8)
+        var completed = false
 
         try {
             while (running.get()) {
@@ -93,16 +101,15 @@ class AudioBufferPlayer(
 
                 val u8 = buffer.readForPlayback(tickU8)
                 if (u8 != null) {
-                    writeU8AsI16(at, u8, i16Scratch)
+                    if (!writeU8AsI16(at, u8, i16Scratch)) break
                     continue
                 }
 
                 if (buffer.isEndOfStream()) {
                     val tail = buffer.readRemainingForPlayback()
-                    if (tail != null) {
-                        writeU8AsI16(at, tail, ShortArray(tail.size))
-                    }
+                    if (tail != null && !writeU8AsI16(at, tail, ShortArray(tail.size))) break
                     if (buffer.isPlaybackComplete()) {
+                        completed = true
                         break
                     }
                 }
@@ -110,34 +117,45 @@ class AudioBufferPlayer(
             }
         } finally {
             running.set(false)
-            releaseTrack()
-            if (buffer.isPlaybackComplete()) {
+            releaseTrackOnce()
+            if (completed) {
                 onComplete()
             }
         }
     }
 
-    private fun writeU8AsI16(at: AudioTrack, u8: ByteArray, scratch: ShortArray) {
+    /** @return false when the track was stopped/released mid-write. */
+    private fun writeU8AsI16(at: AudioTrack, u8: ByteArray, scratch: ShortArray): Boolean {
+        if (!running.get() || track == null) return false
         val n = u8.size
         val samples = if (scratch.size >= n) scratch else ShortArray(n)
         for (i in 0 until n) {
             samples[i] = (((u8[i].toInt() and 0xFF) - 128) shl 8).toShort()
         }
         var offset = 0
-        while (offset < n) {
-            val wrote = at.write(samples, offset, n - offset)
-            if (wrote <= 0) break
-            offset += wrote
+        while (offset < n && running.get()) {
+            try {
+                val wrote = at.write(samples, offset, n - offset)
+                if (wrote <= 0) break
+                offset += wrote
+            } catch (_: IllegalStateException) {
+                return false
+            }
         }
+        return true
     }
 
-    private fun releaseTrack() {
+    private fun releaseTrackOnce() {
+        if (!trackReleased.compareAndSet(false, true)) return
         track?.let { t ->
             try {
                 if (t.playState == AudioTrack.PLAYSTATE_PLAYING) t.stop()
             } catch (_: IllegalStateException) {
             }
-            t.release()
+            try {
+                t.release()
+            } catch (_: IllegalStateException) {
+            }
         }
         track = null
     }
