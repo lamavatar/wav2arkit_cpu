@@ -60,7 +60,14 @@ class FileAudioProducer(
                 val tickStart = System.nanoTime()
                 val n = decoder.readU8(scratch, tickBytes)
                 if (n > 0) {
-                    buffer.writeBlocking(scratch, n) { running.get() && !session.isStopRequested() }
+                    val written = buffer.writeBlocking(scratch, n) {
+                        running.get() && !session.isStopRequested()
+                    }
+                    if (written < n && buffer.freeBytes() == 0) {
+                        Log.w(TAG, "audio buffer full before EOF — truncating at ${buffer.durationMs()}ms")
+                        buffer.markEndOfStream()
+                        break
+                    }
                 }
                 if (decoder.isEof()) {
                     val pad = AppConfig.chunkBytes - (buffer.availableBytes() % AppConfig.chunkBytes)

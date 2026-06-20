@@ -2,13 +2,15 @@ package com.example.splatbench
 
 /**
  * Fixed-capacity linear PCM buffer (no circular overwrite).
- * Producer appends; inference consumes from the front. When full the producer blocks.
+ * Producer appends at [writePos]. ONNX reads [inferReadPos]; speaker playback reads
+ * [playReadPos]. When full the producer blocks until capacity is increased for the clip.
  */
 class AudioBuffer(
     val capacityBytes: Int = AppConfig.audioBufferCapacityBytes,
 ) {
     private val buf = ByteArray(capacityBytes)
-    private var readPos = 0
+    private var inferReadPos = 0
+    private var playReadPos = 0
     private var writePos = 0
     private val lock = Any()
 
@@ -65,38 +67,77 @@ class AudioBuffer(
         }
     }
 
-    fun availableBytes(): Int = synchronized(lock) { writePos - readPos }
+    /** Bytes available for ONNX inference. */
+    fun availableBytes(): Int = synchronized(lock) { writePos - inferReadPos }
 
     fun freeBytes(): Int = synchronized(lock) { capacityBytes - writePos }
 
-    /** Read exactly [nBytes] from the front, or null if not enough data. */
+    /** Bytes decoded but not yet played to the speaker. */
+    fun availableForPlayback(): Int = synchronized(lock) { writePos - playReadPos }
+
+    fun writtenSeconds(): Float = writePos.toFloat() / AppConfig.AUDIO_SR
+
+    fun playPositionMs(): Int =
+        (playReadPos.toLong() * 1000L / AppConfig.AUDIO_SR).toInt()
+
+    fun durationMs(): Int =
+        (totalWritten * 1000L / AppConfig.AUDIO_SR).toInt()
+
+    /** ONNX: read exactly [nBytes], or null if not enough data. */
     fun readChunk(nBytes: Int): ByteArray? {
         if (nBytes <= 0) return null
         synchronized(lock) {
-            val avail = writePos - readPos
+            val avail = writePos - inferReadPos
             if (avail < nBytes) return null
             val out = ByteArray(nBytes)
-            System.arraycopy(buf, readPos, out, 0, nBytes)
-            readPos += nBytes
+            System.arraycopy(buf, inferReadPos, out, 0, nBytes)
+            inferReadPos += nBytes
             return out
         }
     }
 
-    /** Read all remaining bytes without requiring a fixed size. */
+    /** Speaker: read up to [maxBytes] from the play cursor, or null when empty. */
+    fun readForPlayback(maxBytes: Int): ByteArray? {
+        if (maxBytes <= 0) return null
+        synchronized(lock) {
+            val avail = writePos - playReadPos
+            if (avail <= 0) return null
+            val n = minOf(maxBytes, avail)
+            val out = ByteArray(n)
+            System.arraycopy(buf, playReadPos, out, 0, n)
+            playReadPos += n
+            return out
+        }
+    }
+
+    /** ONNX tail after EOS. */
     fun readRemaining(): ByteArray? {
         synchronized(lock) {
-            val avail = writePos - readPos
+            val avail = writePos - inferReadPos
             if (avail <= 0) return null
             val out = ByteArray(avail)
-            System.arraycopy(buf, readPos, out, 0, avail)
-            readPos += avail
+            System.arraycopy(buf, inferReadPos, out, 0, avail)
+            inferReadPos += avail
+            return out
+        }
+    }
+
+    /** Speaker tail after EOS. */
+    fun readRemainingForPlayback(): ByteArray? {
+        synchronized(lock) {
+            val avail = writePos - playReadPos
+            if (avail <= 0) return null
+            val out = ByteArray(avail)
+            System.arraycopy(buf, playReadPos, out, 0, avail)
+            playReadPos += avail
             return out
         }
     }
 
     fun reset() {
         synchronized(lock) {
-            readPos = 0
+            inferReadPos = 0
+            playReadPos = 0
             writePos = 0
         }
         endOfStream = false
@@ -108,4 +149,8 @@ class AudioBuffer(
     }
 
     fun isEndOfStream(): Boolean = endOfStream
+
+    /** True when EOS is set and every written byte has been sent to the speaker. */
+    fun isPlaybackComplete(): Boolean =
+        endOfStream && synchronized(lock) { playReadPos >= writePos }
 }

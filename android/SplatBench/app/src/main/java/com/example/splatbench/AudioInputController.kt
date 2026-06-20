@@ -3,6 +3,7 @@ package com.example.splatbench
 import android.content.Context
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import kotlin.math.ceil
 
 /**
  * Owns the shared [AudioBuffer] and swaps the active [AudioProducer]
@@ -10,7 +11,8 @@ import android.net.Uri
  */
 class AudioInputController(private val context: Context) {
 
-    val buffer = AudioBuffer()
+    var buffer = AudioBuffer()
+        private set
 
     @Volatile var activeSource: ActiveAudioSource = ActiveAudioSource.NONE
         private set
@@ -20,19 +22,31 @@ class AudioInputController(private val context: Context) {
     /** Start streaming the file into the buffer. Returns clip duration in ms. */
     fun startFile(uri: Uri, session: PlaybackSession): Int {
         stop()
-        buffer.reset()
+        val durMs = durationMs(uri)
+        val fileBytes = ceil(durMs / 1000.0 * AppConfig.AUDIO_SR).toInt() + AppConfig.chunkBytes * 4
+        val cap = maxOf(AppConfig.audioBufferCapacityBytes, fileBytes)
+            .coerceAtMost(AppConfig.audioBufferMaxCapacityBytes)
+        buffer = if (buffer.capacityBytes == cap) {
+            buffer.also { it.reset() }
+        } else {
+            AudioBuffer(cap)
+        }
         val p = FileAudioProducer(context, uri)
         producer = p
         p.start(buffer, session)
         activeSource = ActiveAudioSource.FILE
-        return durationMs(uri)
+        return durMs
     }
 
     /** Start mic capture into the buffer (requires ENABLE_MIC_INPUT + permission). */
     fun startMic(session: PlaybackSession) {
         check(AppConfig.ENABLE_MIC_INPUT) { "mic input disabled" }
         stop()
-        buffer.reset()
+        buffer = if (buffer.capacityBytes == AppConfig.audioBufferCapacityBytes) {
+            buffer.also { it.reset() }
+        } else {
+            AudioBuffer(AppConfig.audioBufferCapacityBytes)
+        }
         val p = MicAudioProducer()
         producer = p
         p.start(buffer, session)
@@ -45,7 +59,7 @@ class AudioInputController(private val context: Context) {
         activeSource = ActiveAudioSource.NONE
     }
 
-    fun bufferSeconds(): Float = buffer.availableBytes().toFloat() / AppConfig.AUDIO_SR
+    fun bufferSeconds(): Float = buffer.writtenSeconds()
 
     private fun durationMs(uri: Uri): Int {
         val mmr = MediaMetadataRetriever()

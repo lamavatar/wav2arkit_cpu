@@ -192,7 +192,10 @@ object AppConfig {
 
     // --- Audio buffer / polling / chunking -------------------------------- //
 
-    const val AUDIO_BUFFER_SECONDS = 20.0f  // fixed linear buffer (no overwrite)
+    const val AUDIO_BUFFER_SECONDS = 20.0f  // minimum linear buffer size
+
+    /** Upper cap when sizing the buffer to fit a picked audio file. */
+    const val AUDIO_BUFFER_MAX_SECONDS = 300f
 
     const val POLL_MS = 200L                // producer + inference poll interval
 
@@ -209,6 +212,10 @@ object AppConfig {
     val audioBufferCapacityBytes: Int
 
         get() = (AUDIO_BUFFER_SECONDS * AUDIO_SR).toInt()
+
+    val audioBufferMaxCapacityBytes: Int
+
+        get() = (AUDIO_BUFFER_MAX_SECONDS * AUDIO_SR).toInt()
 
     val fileTickBytes: Int
 

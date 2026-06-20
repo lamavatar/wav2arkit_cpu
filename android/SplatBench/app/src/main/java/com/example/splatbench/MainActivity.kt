@@ -3,7 +3,6 @@ package com.example.splatbench
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.media.MediaPlayer
 import android.net.Uri
 import android.opengl.GLSurfaceView
 import android.os.Build
@@ -53,7 +52,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
     @Volatile private var onnxError: String? = null
     private var pipeline: OnnxExpressionPipeline? = null
 
-    private var mediaPlayer: MediaPlayer? = null
+    private var bufferPlayer: AudioBufferPlayer? = null
     private var audioUri: Uri? = null
 
     private var currentMode = AppConfig.AudioInputMode.FILE
@@ -79,7 +78,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
             )
         } catch (_: SecurityException) {
         }
-        releaseMediaPlayer()
+        releaseBufferPlayer()
         audioUri = uri
         playback.state = PlaybackState.READY
         binding.audioLabel.text = "Audio: ${uri.lastPathSegment ?: uri}"
@@ -584,7 +583,6 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         pf.stopBuild()
         frameCache.clear()
         expressionBuffer.clear()
-        audioInput.buffer.reset()
 
         playbackPipelineStartUptimeMs = SystemClock.uptimeMillis()
         when (currentMode) {
@@ -612,8 +610,11 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         when (currentMode) {
             AppConfig.AudioInputMode.FILE -> {
                 val inferred = expressionBuffer.count
-                val fromDur = ceil(fileDurationMs * AppConfig.EXPRESSION_FPS / 1000.0).toInt()
-                maxOf(inferred, fromDur).coerceAtLeast(1)
+                val fromBuffer = ceil(
+                    audioInput.buffer.totalWritten.toDouble() *
+                        AppConfig.EXPRESSION_FPS / AppConfig.AUDIO_SR,
+                ).toInt()
+                maxOf(inferred, fromBuffer).coerceAtLeast(1)
             }
             AppConfig.AudioInputMode.MIC -> expressionBuffer.count.coerceAtLeast(1)
         }
@@ -659,25 +660,20 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
             return
         }
 
-        val uri = audioUri ?: return
-        releaseMediaPlayer()
-        val mp = MediaPlayer()
-        mediaPlayer = mp
+        if (audioUri == null) return
+        releaseBufferPlayer()
         try {
-            mp.setDataSource(this, uri)
-            mp.setOnCompletionListener {
+            val player = AudioBufferPlayer(audioInput.buffer) {
                 runOnUiThread { onPlaybackComplete() }
             }
-            mp.setOnPreparedListener {
-                playback.resetAudioPosition()
-                recordStartupLatency()
-                mp.start()
-                playback.state = PlaybackState.PLAYING
-                renderer?.startFixedFps()
-                updateControls()
-                glView?.requestRender()
-            }
-            mp.prepareAsync()
+            bufferPlayer = player
+            playback.resetAudioPosition()
+            recordStartupLatency()
+            player.start()
+            playback.state = PlaybackState.PLAYING
+            renderer?.startFixedFps()
+            updateControls()
+            glView?.requestRender()
         } catch (e: Exception) {
             finishSession(resetToReady = true)
             Toast.makeText(this, e.message ?: "audio failed", Toast.LENGTH_SHORT).show()
@@ -685,18 +681,16 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
     }
 
     private fun onPlaybackComplete() {
+        if (playback.state != PlaybackState.PLAYING) return
         finishSession(resetToReady = true)
     }
 
   override fun onUpdateAudioClock() {
         when (currentMode) {
             AppConfig.AudioInputMode.FILE -> {
-                val mp = mediaPlayer
-                if (mp != null) {
-                    try {
-                        playback.updateAudioPositionMs(mp.currentPosition)
-                    } catch (_: IllegalStateException) {
-                    }
+                bufferPlayer?.let { playback.updateAudioPositionMs(it.positionMs()) }
+                if (audioInput.buffer.isPlaybackComplete()) {
+                    runOnUiThread { onPlaybackComplete() }
                 }
             }
             AppConfig.AudioInputMode.MIC -> {
@@ -728,8 +722,8 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         pipeline?.stop()
         pipeline?.resetContext()
         pipeline = null
+        releaseBufferPlayer()
         audioInput.stop()
-        releaseMediaPlayer()
 
         playback.expressionSource = null
         playback.resetAudioPosition()
@@ -753,15 +747,9 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         rebuildPreview()
     }
 
-    private fun releaseMediaPlayer() {
-        mediaPlayer?.let {
-            try {
-                if (it.isPlaying) it.stop()
-            } catch (_: IllegalStateException) {
-            }
-            it.release()
-        }
-        mediaPlayer = null
+    private fun releaseBufferPlayer() {
+        bufferPlayer?.stop()
+        bufferPlayer = null
     }
 
     private fun updateControls() {
@@ -855,7 +843,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
         glView?.onResume()
         when (playback.state) {
             PlaybackState.PLAYING -> {
-                if (currentMode == AppConfig.AudioInputMode.FILE) mediaPlayer?.start()
+                if (currentMode == AppConfig.AudioInputMode.FILE) bufferPlayer?.resume()
                 renderer?.startFixedFps()
                 glView?.requestRender()
             }
@@ -867,7 +855,7 @@ class MainActivity : AppCompatActivity(), SplatRenderer.Callbacks {
     override fun onPause() {
         super.onPause()
         if (playback.state == PlaybackState.PLAYING) {
-            if (currentMode == AppConfig.AudioInputMode.FILE) mediaPlayer?.pause()
+            if (currentMode == AppConfig.AudioInputMode.FILE) bufferPlayer?.pause()
             renderer?.stopFixedFps()
             mainHandler.removeCallbacks(frameRenderRunnable)
         }
